@@ -80,14 +80,22 @@ failing schedule shrinks to a few steps and prints them.
 (`packages/crdt/test/harness.test.ts`): a correct toy CRDT must pass, and three broken toys must fail, each only when
 the network freedom that exposes its flaw is switched on: edits by index fail only with concurrent edits, a
 non-idempotent text only with redelivery or echo, one that drops a delete arriving before its insert only with
-reordering. With every freedom on, each is caught within a median of 1 to 3 schedules (`npm run harness-stats -w
-@coedit/crdt`).
+reordering, and one that removes a deleted character outright only with the state check. With every freedom on, each
+is caught within a median of 1 or 2 schedules, at most 11 (`npm run harness-stats -w @coedit/crdt`).
+
+**Why compare the replicas' state, not just their text?** Two RGA replicas can show the same text while a tombstone
+sits in a different place in each; the next insert next to it then lands differently and they diverge for good. So a
+replica can write out its whole state canonically (`state()`), and the simulator compares that too. The toy that drops
+a tombstone shows both sides: without redelivery its texts always agree and only the state check fails it; with
+redelivery even the texts diverge, because a duplicate insert brings the deleted character back, which is exactly what
+tombstones are for.
 
 **What was wrong with the first version of the simulator?** Its schedules were too tame. fast-check keeps arrays near
 10 items by default, whatever `maxLength` says, and edits were one of three equally likely steps, so a schedule had 1.3
 edits on average and only a quarter had any concurrent edit. Weighting edits and using `size: 'medium'` gave 4.9 edits
-and 68%, and the causal-delivery flaw went from a median of 13 schedules to catch to 3. I found it by measuring what
-the schedules contain, not by a failing test: a weak generator fails silently.
+and 68% (5.3 and 71% after the review widened it), and the early-delete flaw went from a median of 13 schedules to
+catch to 2. I found it by measuring what the schedules contain, not by a failing test: a weak generator fails
+silently. The same trap was still in the final flush (its picks stopped at 10), which the review found.
 
 ## The client and server (day 1)
 
@@ -109,3 +117,22 @@ means the same thing for everyone on reconnect. The cost is the sender's own edi
 **Why Node's test runner and type stripping, not Vitest or tsx?** Node runs the `.ts` files directly (types are
 erased), so the server and tests need no build step and `tsc` only checks types. Also, on this machine's Node 23,
 Vitest 5's and ESLint 10's engine ranges exclude it; Node's own runner needs nothing.
+
+## The reviews (day 1)
+
+**What did the review find, and what was the worst of it?** Eight defects, each as a failing test. The worst: the
+simulator gave every replica the same operation object, so state could travel through it. A toy that never applied a
+remote delete, but flagged the element object it kept (the received operation itself), passed 2,000 schedules,
+because the flag showed up on every replica at once. A real network gives each replica its own decoded copy; the
+simulator now copies at send and at each delivery, and a test pins each copy. Others: the flush's order was random
+only for its first 10 deliveries, a flaky test, an encoder that an Array subclass could trick, docs that were wrong
+about `diffText`, and an empty host binding every interface. README "Review of day 1" lists them with their commits.
+
+**What did you learn about testing the tester?** The self-test (broken toys must fail) can't see a weak generator: the
+toys fail under weak schedules too. The review weakened the generator six ways with every test passing. What pins it
+is measuring the schedules directly (`harness-coverage.test.ts`) and testing each delivery mechanism on hand-written
+schedules (`harness-mechanics.test.ts`); every survivor was then re-run as a mutant and fails.
+
+**Did your fixes break anything?** One, found before the second review: the copies made `harness-stats` count
+operations by identity on objects that were now fresh copies, so it reported 0.0 redeliveries. The numbers in the
+README were re-measured after fixing it.
