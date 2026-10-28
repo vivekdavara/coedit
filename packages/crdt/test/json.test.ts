@@ -68,7 +68,15 @@ describe('parseJson accepts', () => {
         const text = `"${'x'.repeat(n)}${special}${'y'.repeat(n)}"`;
         assert.equal(parseJson(text), JSON.parse(text), text);
       }
-      refused(`"${'x'.repeat(n)}\u0001"`, /control character/);
+      // Both ends of the control range, inside the 16-character window and past it; the first characters
+      // after it are plain content (review 2: only U+0001 was tested, so U+0000 and U+001F could slip through).
+      for (const control of ['\u0000', '\u0001', '\u001f']) {
+        refused(`"${'x'.repeat(n)}${control}${'y'.repeat(n)}"`, /control character/);
+      }
+      for (const plain of [' ', '\u007f']) {
+        const text = `"${'x'.repeat(n)}${plain}"`;
+        assert.equal(parseJson(text), JSON.parse(text), JSON.stringify(text));
+      }
       refused(`"${'x'.repeat(n)}`, /unterminated string at offset 0/);
       refused(`"${'x'.repeat(n)}\\`, /bad escape/);
       refused(`["${'x'.repeat(n)}"`, /unexpected end/);

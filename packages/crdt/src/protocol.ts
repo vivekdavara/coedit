@@ -316,12 +316,15 @@ function fields(
 
 function list(value: JsonValue | undefined, path: string, max: number): JsonValue[] {
   if (!Array.isArray(value)) throw new ProtocolError(path, 'must be an array');
-  if (value.length === 0) throw new ProtocolError(path, 'must not be empty');
-  if (value.length > max) throw new ProtocolError(path, `more than ${max} items`);
-  // A plain copy, read by index. An encoder's caller could pass an Array subclass (whose map() returns the
-  // subclass, which JSON.stringify then writes through its toJSON) or an array with its own map property.
+  // A plain copy, read by index, with the length read once. An encoder's caller could pass an Array subclass (whose
+  // map() returns the subclass, which JSON.stringify then writes through its toJSON), an array with its own map
+  // property, or one whose index getter appends to it while it's copied (review 2: a live length let that grow
+  // past the limit after the check).
+  const length = value.length;
+  if (length === 0) throw new ProtocolError(path, 'must not be empty');
+  if (length > max) throw new ProtocolError(path, `more than ${max} items`);
   const items: JsonValue[] = [];
-  for (let i = 0; i < value.length; i++) items.push(value[i] as JsonValue);
+  for (let i = 0; i < length; i++) items.push(value[i] as JsonValue);
   return items;
 }
 
