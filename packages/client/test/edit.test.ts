@@ -67,12 +67,12 @@ describe('diffText', () => {
     assert.deepEqual(applyEdit('😀😀', diffText('😀😀', '😀😀😀', 3) as Edit), '😀😀😀');
   });
 
-  test('any caret, even a wrong or out-of-range one, gives an edit that turns before into after', () => {
+  test('any caret, even a wrong, out-of-range or non-integer one, gives an edit that turns before into after', () => {
     fc.assert(
       fc.property(
         text,
         text,
-        fc.option(fc.integer({ min: -3, max: 30 }), { nil: undefined }),
+        fc.option(fc.oneof(fc.integer({ min: -3, max: 30 }), fc.double()), { nil: undefined }),
         (before, after, caret) => {
           const edit = diffText(before, after, caret);
           if (before === after) {

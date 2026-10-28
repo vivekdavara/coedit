@@ -18,11 +18,19 @@ export interface Edit {
 
 /**
  * The edit that turns `before` into `after`, or null if they're equal. `caret` is the caret's UTF-16 offset in
- * `after` (the textarea's `selectionEnd` after the input). Without it, or wherever it can't be right, the result is
- * still an edit that turns `before` into `after`; the caret only chooses among the equally small ones.
+ * `after` (the textarea's `selectionEnd` after the input).
+ *
+ * Without a caret the edit is the smallest one: the common prefix, then the common suffix of what remains. With
+ * one, the inserted text is made to end at the caret where it can, which is where the browser leaves it after
+ * typing, pasting, deleting or replacing a selection. In a run of equal characters that picks the position actually
+ * typed at; it can also make the edit bigger than the smallest, and then it's the edit that was made: replacing
+ * "orld" in "hello world" by "and" (caret after it) gives delete 4, insert "and", not delete 3, insert "an" keeping
+ * the old "d". Any caret, even a wrong, out-of-range or non-integer one (treated as none), still gives an edit that
+ * turns `before` into `after`.
  */
 export function diffText(before: string, after: string, caret?: number): Edit | null {
   if (before === after) return null;
+  if (caret !== undefined && !Number.isInteger(caret)) caret = undefined;
   const b = Array.from(before);
   const a = Array.from(after);
   const shorter = Math.min(a.length, b.length);

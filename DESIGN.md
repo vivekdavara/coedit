@@ -254,9 +254,12 @@ Server to client:
 A `<textarea>`, not `contenteditable`: plain text with a selection API that behaves the same in every browser.
 
 - **Input to an edit.** On each input event the client compares the text before and after and finds the one changed
-  span: the common prefix, then the common suffix of what remains, in code points (`packages/client/src/edit.ts`,
-  day 1). The caret after the change breaks ties: typing `a` into `aa` could have inserted at either place, and the
-  caret says which.
+  span, in code points (`packages/client/src/edit.ts`, day 1). The caret decides where it is: after typing, pasting,
+  deleting or replacing a selection the browser leaves the caret right after the inserted text, so the common suffix
+  is taken first and may not reach left of the caret, then the common prefix of what remains. Typing `a` into `aa`
+  could have inserted at any of three places, and the caret says which. The edit found can be bigger than the
+  smallest one, when it's what was typed: replacing "orld" by "and" is a delete of 4 and an insert of 3, although
+  keeping the old "d" would be smaller; which element is kept decides where a concurrent insert next to it lands.
 - **Remote changes.** A remote operation's visible change is applied to the text, and the caret and selection move
   with it: an insert before the caret shifts it right, a delete around it pulls it to the delete's start.
 - **IME composition** (typing Chinese, Japanese, accented letters by dead keys): while a composition is open the
