@@ -202,6 +202,8 @@ Delete  = { "type": "delete", "spans": [ { "replica": string, "counter": integer
 - `text`: 1 to 10,000 code points, well-formed UTF-16 (JSON can carry a lone surrogate as `"\ud800"`; that's
   refused). A run's last counter, `counter + length - 1`, must stay in the safe range.
 - `spans`: 1 to 1,000 spans, each `length` 1 to 10,000, last counter in the safe range.
+- An `ops` message carries 1 to 1,000 operations; an `error`'s message is at most 1,000 code points. The 1 MiB limit on
+  a whole message is the WebSocket server's (day 3), checked before decoding.
 - Unknown and missing keys are refused; key order and whitespace don't matter to the decoder, and the encoder always
   writes one canonical text (keys in the order above, no whitespace).
 - The decoder reads JSON with its own strict reader (`packages/crdt/src/json.ts`), not `JSON.parse`, which keeps the
@@ -237,7 +239,8 @@ Server to client:
   outbox when it comes back with a sequence number, and the CRDT ignores the duplicate. It costs the sender a copy of
   its own edits; in exchange every client sees the same numbered log, and `have` means the same thing for all.
 - **Reconnect.** The client remembers the last sequence number it applied. On reconnect it sends `hello` with it,
-  receives what it missed, then resends its whole outbox. The server applies operations to its own replica first, so
+  receives what it missed, then resends its whole outbox. Both go in as many messages as it takes at 1,000
+  operations each. The server applies operations to its own replica first, so
   a resent operation it already has is recognized and not logged twice.
 - **The server validates by applying.** An operation the server's replica refuses (bad shape, same id with different
   content, counter not above its origin's) gets an `error` and the connection is closed; nothing is relayed.

@@ -318,7 +318,11 @@ function list(value: JsonValue | undefined, path: string, max: number): JsonValu
   if (!Array.isArray(value)) throw new ProtocolError(path, 'must be an array');
   if (value.length === 0) throw new ProtocolError(path, 'must not be empty');
   if (value.length > max) throw new ProtocolError(path, `more than ${max} items`);
-  return value;
+  // A plain copy, read by index. An encoder's caller could pass an Array subclass (whose map() returns the
+  // subclass, which JSON.stringify then writes through its toJSON) or an array with its own map property.
+  const items: JsonValue[] = [];
+  for (let i = 0; i < value.length; i++) items.push(value[i] as JsonValue);
+  return items;
 }
 
 function integer(
