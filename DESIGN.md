@@ -181,8 +181,17 @@ in a deterministic network simulator (`packages/crdt/test/harness/`, day 1):
   reordering), and one that removes a locally deleted character instead of keeping a tombstone (its texts agree and
   only the state check sees it; with redelivery its texts diverge too). If the harness couldn't catch those, a passing
   RGA would prove nothing.
-- **Day 2 adds**, for RGA: convergence over 2 to 5 replicas; agreement with a plain string model when edits are made
-  one at a time; runs typed concurrently at one spot never interleave; refusals for each kind of bad operation.
+- **Day 2 adds**, for RGA: convergence over 2 to 5 replicas, comparing `state()` (ids and tombstones) as well as
+  text; agreement with a plain string model when edits are made one at a time (`localModel`); runs typed concurrently
+  at one spot never interleave, and the backward-typing interleave pinned as documented; refusals for each kind of bad
+  operation. Also, from day 1's review:
+  - **The id order directly**, against UTF-16 code-unit order, on the simulator's replica names (`m Z b B mm a_`,
+    whose code-unit, locale and creation orders all differ): within one process the convergence check can't catch a
+    comparator that is wrong only across machines, such as `localeCompare`.
+  - **Large counters**: replicas whose clocks start near 2^31 and near 2^53 - 1 - 10,000, since generated schedules
+    keep counters under about 100.
+  - The pending set: operations whose dependency never arrives stay pending and count in `pending`; nothing else
+    changes.
 
 ## The wire format (day 1)
 
