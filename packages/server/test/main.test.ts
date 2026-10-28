@@ -1,0 +1,133 @@
+// The server's command line, run as a child process the way `npm start` runs it.
+import assert from 'node:assert/strict';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { once } from 'node:events';
+import { createServer } from 'node:net';
+import { fileURLToPath } from 'node:url';
+import { describe, test } from 'node:test';
+import { hostPort } from '../src/config.ts';
+
+const MAIN = fileURLToPath(new URL('../src/main.ts', import.meta.url));
+
+interface Run {
+  child: ChildProcess;
+  stdout: () => string;
+  stderr: () => string;
+  exit: Promise<number | null>;
+}
+
+function start(env: Record<string, string>): Run {
+  const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', MAIN], {
+    env: { PATH: process.env['PATH'] ?? '', ...env },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let out = '';
+  let err = '';
+  child.stdout.setEncoding('utf8').on('data', (chunk: string) => (out += chunk));
+  child.stderr.setEncoding('utf8').on('data', (chunk: string) => (err += chunk));
+  const exit = once(child, 'exit').then(([code]) => code as number | null);
+  return { child, stdout: () => out, stderr: () => err, exit };
+}
+
+/** Waits for the "listening" line; fails the test (and kills the child) after 10 s. */
+async function listening(run: Run): Promise<string> {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    const match = /listening on (http:\/\/\S+)/.exec(run.stdout());
+    if (match?.[1] !== undefined) return match[1];
+    if (Date.now() > deadline || run.child.exitCode !== null) {
+      run.child.kill('SIGKILL');
+      assert.fail(
+        `no "listening" line; stdout ${JSON.stringify(run.stdout())}, stderr ${JSON.stringify(run.stderr())}`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+describe('main', () => {
+  test('serves /healthz on the port it prints, and exits 0 on SIGINT', async () => {
+    const run = start({ COEDIT_PORT: '0' });
+    const url = await listening(run);
+    assert.match(url, /^http:\/\/127\.0\.0\.1:\d+$/);
+    const response = await fetch(`${url}/healthz`);
+    assert.equal(response.status, 200);
+    await response.text();
+    run.child.kill('SIGINT');
+    assert.equal(await run.exit, 0);
+    assert.match(run.stdout(), /SIGINT: closing/);
+  });
+
+  test('exits 0 on SIGTERM', async () => {
+    const run = start({ COEDIT_PORT: '0' });
+    await listening(run);
+    run.child.kill('SIGTERM');
+    assert.equal(await run.exit, 0);
+  });
+
+  test('prints an IPv6 address in brackets', async (t) => {
+    const probe = createServer();
+    const ok = await new Promise<boolean>((resolve) => {
+      probe.once('error', () => {
+        resolve(false);
+      });
+      probe.listen(0, '::1', () => {
+        resolve(true);
+      });
+    });
+    probe.close();
+    if (!ok) {
+      t.skip('no IPv6 loopback here');
+      return;
+    }
+    const run = start({ COEDIT_HOST: '::1', COEDIT_PORT: '0' });
+    const url = await listening(run);
+    assert.match(url, /^http:\/\/\[::1\]:\d+$/);
+    const response = await fetch(`${url}/healthz`);
+    assert.equal(response.status, 200);
+    await response.text();
+    run.child.kill('SIGINT');
+    assert.equal(await run.exit, 0);
+  });
+
+  test('refuses a bad COEDIT_PORT with exit 2', async () => {
+    for (const port of ['08110', '65536', 'abc', '']) {
+      const run = start({ COEDIT_PORT: port });
+      assert.equal(await run.exit, 2, port);
+      assert.match(run.stderr(), /COEDIT_PORT must be a port number from 0 to 65535/);
+    }
+  });
+
+  test('refuses an empty COEDIT_HOST, which Node would read as every interface', async () => {
+    const run = start({ COEDIT_HOST: '', COEDIT_PORT: '0' });
+    assert.equal(await run.exit, 2);
+    assert.match(run.stderr(), /COEDIT_HOST must not be empty/);
+  });
+
+  test("says why when it can't listen, with exit 1 and no stack trace", async () => {
+    const blocker = createServer();
+    await new Promise<void>((resolve) => blocker.listen(0, '127.0.0.1', resolve));
+    const address = blocker.address();
+    assert.ok(address !== null && typeof address === 'object');
+    try {
+      const run = start({ COEDIT_PORT: String(address.port) });
+      assert.equal(await run.exit, 1);
+      assert.match(
+        run.stderr(),
+        new RegExp(`^can't listen on 127\\.0\\.0\\.1:${address.port}: .*EADDRINUSE`),
+      );
+      assert.doesNotMatch(run.stderr(), /\n\s+at /);
+    } finally {
+      await new Promise((resolve) => blocker.close(resolve));
+    }
+  });
+});
+
+describe('hostPort', () => {
+  test('brackets IPv6 addresses only', () => {
+    assert.equal(hostPort('127.0.0.1', 8110), '127.0.0.1:8110');
+    assert.equal(hostPort('localhost', 1), 'localhost:1');
+    assert.equal(hostPort('::1', 8110), '[::1]:8110');
+    assert.equal(hostPort('fe80::1%lo0', 80), '[fe80::1%lo0]:80');
+  });
+});

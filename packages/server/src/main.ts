@@ -1,9 +1,14 @@
 // The server's command line: `npm start -w @coedit/server`. Settings come from the environment:
 // COEDIT_HOST (default 127.0.0.1) and COEDIT_PORT (default 8110).
-import { DEFAULT_HOST, DEFAULT_PORT, startServer } from './server.ts';
-import { parsePort } from './config.ts';
+import { DEFAULT_HOST, DEFAULT_PORT, startServer, type SyncServer } from './server.ts';
+import { hostPort, parsePort } from './config.ts';
 
 const host = process.env['COEDIT_HOST'] ?? DEFAULT_HOST;
+if (host === '') {
+  // Node reads an empty host as "every interface", which is not what an empty setting should mean.
+  console.error('COEDIT_HOST must not be empty (unset it for 127.0.0.1)');
+  process.exit(2);
+}
 const portText = process.env['COEDIT_PORT'];
 const port = portText === undefined ? DEFAULT_PORT : parsePort(portText);
 if (port === undefined) {
@@ -13,8 +18,14 @@ if (port === undefined) {
   process.exit(2);
 }
 
-const server = await startServer({ host, port });
-console.log(`coedit server listening on http://${server.host}:${server.port}`);
+let server: SyncServer;
+try {
+  server = await startServer({ host, port });
+} catch (error) {
+  console.error(`can't listen on ${hostPort(host, port)}: ${(error as Error).message}`);
+  process.exit(1);
+}
+console.log(`coedit server listening on http://${hostPort(server.host, server.port)}`);
 
 let stopping = false;
 const stop = (signal: NodeJS.Signals) => {

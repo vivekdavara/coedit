@@ -7,3 +7,8 @@ export function parsePort(text: string): number | undefined {
   const port = Number(text);
   return port <= 65535 ? port : undefined;
 }
+
+/** `host:port`, with an IPv6 address in brackets as URLs need it (`[::1]:8110`). */
+export function hostPort(host: string, port: number): string {
+  return host.includes(':') ? `[${host}]:${port}` : `${host}:${port}`;
+}
