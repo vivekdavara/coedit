@@ -1,0 +1,12 @@
+{
+  "name": "@coedit/crdt",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A sequence CRDT (RGA) for plain text, and the sync protocol's messages",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./protocol": "./src/protocol.ts"
+  }
+}

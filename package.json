@@ -1,0 +1,35 @@
+{
+  "name": "coedit",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Real-time collaborative text editor on a hand-written sequence CRDT (RGA)",
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "packages/crdt",
+    "packages/server",
+    "packages/client"
+  ],
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "typecheck": "tsc -p packages/crdt && tsc -p packages/server && tsc -p packages/client",
+    "lint": "eslint . --max-warnings 0 && prettier --check .",
+    "format": "prettier --write .",
+    "test": "node --disable-warning=ExperimentalWarning --test --test-reporter=dot \"packages/*/test/**/*.test.ts\"",
+    "build": "npm run build -w @coedit/client",
+    "check": "npm run typecheck && npm run lint && npm run test && npm run build"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@types/node": "^22.20.5",
+    "eslint": "^9.39.5",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "fast-check": "^4.10.2",
+    "globals": "^17.13.0",
+    "prettier": "^3.9.10",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.72.1"
+  }
+}
