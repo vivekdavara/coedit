@@ -8,5 +8,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./protocol": "./src/protocol.ts"
+  },
+  "scripts": {
+    "harness-stats": "node --disable-warning=ExperimentalWarning scripts/harness_stats.ts"
   }
 }
