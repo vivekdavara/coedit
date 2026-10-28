@@ -18,6 +18,7 @@ describe('health endpoint', () => {
     const response = await fetch(`${base}/healthz`);
     assert.equal(response.status, 200);
     assert.equal(response.headers.get('content-type'), 'application/json; charset=utf-8');
+    assert.equal(response.headers.get('cache-control'), 'no-store');
     assert.deepEqual(await response.json(), { status: 'ok', protocol: PROTOCOL_VERSION });
   });
 

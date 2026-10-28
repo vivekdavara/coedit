@@ -3,7 +3,10 @@ import type { AddressInfo } from 'node:net';
 import { PROTOCOL_VERSION } from '@coedit/crdt/protocol';
 
 export interface ServerOptions {
-  /** The address to listen on. Default 127.0.0.1: the server is for this machine unless told otherwise. */
+  /**
+   * The address to listen on. Default 127.0.0.1: the server is for this machine unless told otherwise. An empty
+   * string is refused (Node would read it as every interface).
+   */
   host?: string;
   /** The port to listen on; 0 picks a free one (the tests do). Default 8110. */
   port?: number;
@@ -22,8 +25,11 @@ export const DEFAULT_HOST = '127.0.0.1';
 
 /** Starts the server; resolves once it is listening, rejects if it can't bind. */
 export async function startServer(options: ServerOptions = {}): Promise<SyncServer> {
+  const host = options.host ?? DEFAULT_HOST;
+  // listen(port, '') binds every interface; an empty setting must not mean that.
+  if (host === '') throw new Error('the host must not be empty');
   const http = createServer(handleRequest);
-  await listen(http, options.host ?? DEFAULT_HOST, options.port ?? DEFAULT_PORT);
+  await listen(http, host, options.port ?? DEFAULT_PORT);
   const address = http.address() as AddressInfo;
   let closing: Promise<void> | undefined;
   return {
