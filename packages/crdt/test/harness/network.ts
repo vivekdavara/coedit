@@ -186,11 +186,15 @@ export function run<Op, R extends Replica<Op>>(
   }
   /** Each replica's text and state, to check that a step changed only the replica it was meant to. */
   const snapshot = () => replicas.map((r) => `${r.text()}\u0000${r.state?.() ?? ''}`);
-  const onlyChanged = (before: readonly string[], changed: number, what: string) => {
-    const after = snapshot();
+  // The snapshot after the last step is the one before the next: nothing touches a replica between steps. Once a
+  // step instead of twice halved the self-test's time (5.4 s to 2.6 s here; 0.4 s with no snapshots at all).
+  let last = snapshot();
+  const onlyChanged = (changed: number, what: string) => {
+    const now = snapshot();
     for (let i = 0; i < replicas.length; i++) {
-      if (i !== changed && after[i] !== before[i]) fail(`${what} changed ${replicaName(i)} too`);
+      if (i !== changed && now[i] !== last[i]) fail(`${what} changed ${replicaName(i)} too`);
     }
+    last = now;
   };
   const messages: Message<Op>[] = [];
   const inFlight: Delivery[] = [];
@@ -213,9 +217,8 @@ export function run<Op, R extends Replica<Op>>(
     // and changed a received object would otherwise change it for every replica (review 1 found a broken toy
     // that passed that way). And a delivery may change only its target: replicas sharing state some other way
     // (review 2: a cache of elements common to all replicas) are caught here.
-    const before = snapshot();
     (replicas[d.to] as R).receive(transport(message.op));
-    onlyChanged(before, d.to, `${label} to ${replicaName(d.to)}`);
+    onlyChanged(d.to, `${label} to ${replicaName(d.to)}`);
   };
 
   const deliverAt = (index: number, label: string) => {
@@ -244,9 +247,8 @@ export function run<Op, R extends Replica<Op>>(
         trace.push(
           `${replicaName(r)} edits: at ${index} delete ${deleteCount} insert ${JSON.stringify(step.text)}`,
         );
-        const others = snapshot();
         const ops = subject.edit(replica, index, deleteCount, step.text);
-        onlyChanged(others, r, `${replicaName(r)}'s local edit`);
+        onlyChanged(r, `${replicaName(r)}'s local edit`);
         if (options.localModel ?? false) {
           const expected = [
             ...before.slice(0, index),
