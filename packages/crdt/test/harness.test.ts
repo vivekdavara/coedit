@@ -11,7 +11,13 @@ import {
   type Replica,
   type Subject,
 } from './harness/network.ts';
-import { assumesCausalDelivery, byIndex, notIdempotent, sortedText } from './harness/toys.ts';
+import {
+  assumesCausalDelivery,
+  byIndex,
+  dropsLocalTombstones,
+  notIdempotent,
+  sortedText,
+} from './harness/toys.ts';
 
 /** Every freedom off: one edit at a time, delivered in order, once. */
 const TAME: NetworkOptions = { reorder: false, duplicates: false, echo: false, concurrency: false };
@@ -81,6 +87,31 @@ describe('a text that assumes causal delivery', () => {
 
   test('diverges when delivery is reordered', () => {
     fails(assumesCausalDelivery, {});
+  });
+});
+
+describe('the state check', () => {
+  // Without redelivery or echo, dropping a tombstone leaves every text right and the hidden state wrong.
+  const once: NetworkOptions = { echo: false, duplicates: false };
+  const textOnly = {
+    ...dropsLocalTombstones,
+    create: (name: string) =>
+      Object.assign(dropsLocalTombstones.create(name), { state: undefined }),
+  };
+
+  test('fails a text whose replicas agree on the text but not on their tombstones', () => {
+    const error = fails(dropsLocalTombstones, once);
+    assert.match(error.message, /states diverged \(their texts agree\)/);
+  });
+
+  test('is what catches it: the texts alone converge', () => {
+    passes(textOnly, once);
+  });
+
+  test('with redelivery even the texts diverge: a duplicate insert brings the character back', () => {
+    const error = fails(textOnly, { echo: false });
+    assert.match(error.message, /replicas diverged\n/);
+    assert.match(error.message, /redeliver #/);
   });
 });
 

@@ -23,6 +23,11 @@ interface SortedFlaws {
   readonly notIdempotent?: boolean;
   /** A delete that arrives before its insert is dropped, so the character comes back when the insert arrives. */
   readonly assumesCausalDelivery?: boolean;
+  /**
+   * A local delete removes the character outright instead of leaving a tombstone. The text is still right
+   * everywhere; the hidden state isn't (in RGA, a later insert after that character would land elsewhere).
+   */
+  readonly dropsLocalTombstones?: boolean;
 }
 
 interface SortedElement {
@@ -61,6 +66,20 @@ class SortedReplica implements Replica<SortedOp> {
       .join('');
   }
 
+  /** Every element held (with its tombstone flag, in id order), then every id deleted, whether held or not. */
+  state(): string {
+    const elements = [...this.elements]
+      .sort(
+        (a, b) =>
+          a.counter - b.counter || (a.replica < b.replica ? -1 : a.replica > b.replica ? 1 : 0),
+      )
+      .map((e) => {
+        const k = key(e.counter, e.replica);
+        return `${k}=${JSON.stringify(e.char)}${this.deleted.has(k) ? '(deleted)' : ''}`;
+      });
+    return `${elements.join(' ')} | deleted ${[...this.deleted].sort().join(' ')}`;
+  }
+
   has(k: string): boolean {
     return this.elements.some((e) => key(e.counter, e.replica) === k);
   }
@@ -90,7 +109,14 @@ function sorted(name: string, flaws: SortedFlaws = {}): Subject<SortedOp, Sorted
         ops.push({ kind: 'insert', counter: replica.clock + 1, replica: replica.name, char });
         replica.clock++;
       }
-      for (const op of ops) replica.receive(op);
+      for (const op of ops) {
+        if (op.kind === 'delete' && flaws.dropsLocalTombstones) {
+          const at = replica.elements.findIndex((e) => key(e.counter, e.replica) === op.key);
+          replica.elements.splice(at, 1);
+        } else {
+          replica.receive(op);
+        }
+      }
       return ops;
     },
   };
@@ -101,6 +127,9 @@ export const sortedText = sorted('sorted text');
 export const notIdempotent = sorted('sorted text, not idempotent', { notIdempotent: true });
 export const assumesCausalDelivery = sorted('sorted text, assumes causal delivery', {
   assumesCausalDelivery: true,
+});
+export const dropsLocalTombstones = sorted('sorted text, drops local tombstones', {
+  dropsLocalTombstones: true,
 });
 
 // ---- By index: operations name positions, as a plain text editor's undo log would ----

@@ -17,6 +17,11 @@ import fc from 'fast-check';
 export interface Replica<Op> {
   /** What gets compared across replicas at the end. */
   text(): string;
+  /**
+   * The whole internal state, written canonically (ids, tombstones). If present it's compared too, after the text:
+   * replicas whose texts agree but whose hidden state differs will disagree on a later edit.
+   */
+  state?(): string;
   /** Applies an operation sent by any replica, possibly this one, possibly again. */
   receive(op: Op): void;
 }
@@ -218,6 +223,11 @@ export function run<Op, R extends Replica<Op>>(
   drain('flush', schedule.flush);
   const texts = replicas.map((r) => r.text());
   if (texts.some((t) => t !== texts[0])) fail('replicas diverged');
+  const states = replicas.map((r) => r.state?.());
+  if (states.some((s) => s !== states[0])) {
+    const lines = states.map((s, i) => `  r${i}: ${String(s)}`).join('\n');
+    fail(`replicas' states diverged (their texts agree):\n${lines}`);
+  }
 }
 
 /** The convergence property for a subject, for fc.assert or fc.check. */

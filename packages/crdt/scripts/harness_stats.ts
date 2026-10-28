@@ -9,7 +9,13 @@ import {
   type Replica,
   type Subject,
 } from '../test/harness/network.ts';
-import { assumesCausalDelivery, byIndex, notIdempotent, sortedText } from '../test/harness/toys.ts';
+import {
+  assumesCausalDelivery,
+  byIndex,
+  dropsLocalTombstones,
+  notIdempotent,
+  sortedText,
+} from '../test/harness/toys.ts';
 
 const samples = Number(process.argv[2] ?? 2000);
 const seeds = Number(process.argv[3] ?? 200);
@@ -85,6 +91,11 @@ const cases: Array<[string, Subject<never, never>, NetworkOptions]> = [
   ['not idempotent, duplicates on', notIdempotent as never, { duplicates: true, echo: false }],
   ['not idempotent, echo on', notIdempotent as never, { duplicates: false, echo: true }],
   ['assumes causal delivery, reorder on', assumesCausalDelivery as never, {}],
+  [
+    'drops local tombstones, state compared',
+    dropsLocalTombstones as never,
+    { echo: false, duplicates: false },
+  ],
 ];
 for (const [label, subject, options] of cases) {
   const runs: number[] = [];

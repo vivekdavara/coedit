@@ -112,7 +112,14 @@ deletes, as spans of consecutive counters of one replica, since a deleted range 
 - **Duplicates.** Inserting an id that exists is a no-op, and deleting a tombstone is a no-op, so redelivery is
   harmless (the sync client resends after reconnecting, and the server echoes, below).
 - **The same id with different content** (another character or another origin) would split replicas apart for good,
-  so it's an error, not a duplicate: the operation is refused.
+  so it's an error, not a duplicate: the operation is refused. A run is created whole by one replica and its counters
+  are never reused, so a resent run is either entirely known (a duplicate) or entirely new; a run that is partly known
+  can only come from a reused counter, and is refused too.
+- **In Coedit's own topology delivery is causal anyway.** A client sends its operations in order on one WebSocket and
+  references only elements it got from the server or made itself, so the server always has an operation's
+  dependencies when it arrives, and refuses one whose dependencies it lacks (it never holds pending operations). The
+  server's log is therefore in causal order, and so is every client's view of it. The pending set is for everything
+  else: tests that deliver in any order, a future peer-to-peer mode, and not having to trust that reasoning.
 
 ### Positions and ids
 
@@ -125,6 +132,36 @@ The first implementation keeps the elements in one array and finds positions by 
 and easy to test. Day 4 measures it; if it's too slow at realistic sizes, an order-statistics tree replaces the array
 behind the same interface.
 
+### The interface (day 2)
+
+```ts
+class Rga {
+  constructor(replica: string);
+  text(): string; // the visible text
+  readonly length: number; // visible code points
+  /** A local edit, applied at once; returns the operations to send (a delete, then an insert). */
+  edit(index: number, deleteCount: number, text: string): Op[];
+  /**
+   * Applies an operation from anyone (an echo of this replica's own included). Returns the visible changes, in
+   * order: none for a duplicate or for an operation still waiting on a dependency, and, when an operation completes
+   * the dependencies of waiting ones, theirs too. Throws ConflictError for an id reused with different content.
+   */
+  apply(op: Op): Change[];
+  /** For presence: the id of the visible element before `index` (null at 0), and where a position is now. */
+  idBefore(index: number): Id | null;
+  indexAfter(id: Id | null): number;
+  readonly pending: number; // operations waiting on a dependency
+}
+type Change =
+  | { type: 'insert'; index: number; text: string }
+  | { type: 'delete'; index: number; count: number };
+```
+
+The convergence tests drive it through the simulator's `Subject` interface (`edit` and `apply`), compare `text()`
+across replicas, and also require that every replica's internal sequence (ids, tombstones included) is identical, not
+only the text: two replicas whose texts agree but whose tombstones sit in different places would diverge on the
+next insert.
+
 ## Testing convergence
 
 Convergence is a property over every possible interleaving, so it's tested with generated schedules (fast-check),
@@ -135,10 +172,15 @@ in a deterministic network simulator (`packages/crdt/test/harness/`, day 1):
   delivering a copy of an already-delivered message again. Not delivering for a while is a partition.
 - **The final check.** After the generated steps, every message is delivered everywhere in a random order, and every
   replica must show the same text. A failing schedule shrinks to a minimal one, printed as the steps.
-- **The harness tests itself in both directions.** A correct toy CRDT must pass. Three wrong ones must _fail_, each
-  for its own reason: one that applies inserts by index (diverges under concurrency), one that isn't idempotent
-  (breaks on redelivery), and one that assumes causal delivery (breaks on reordering). If the harness couldn't catch
-  those, a passing RGA would prove nothing.
+- **Text and state.** The text must agree, and so must each replica's whole internal state when the replica can write
+  it out canonically (`state()`): two replicas with the same text but tombstones in different places would disagree
+  on the next edit.
+- **The harness tests itself in both directions.** A correct toy CRDT must pass. Four wrong ones must _fail_, each
+  only when the network freedom (or check) that exposes it is on: one that applies inserts by index (diverges under
+  concurrency), one that isn't idempotent (breaks on redelivery or echo), one that assumes causal delivery (breaks on
+  reordering), and one that removes a locally deleted character instead of keeping a tombstone (its texts agree and
+  only the state check sees it; with redelivery its texts diverge too). If the harness couldn't catch those, a passing
+  RGA would prove nothing.
 - **Day 2 adds**, for RGA: convergence over 2 to 5 replicas; agreement with a plain string model when edits are made
   one at a time; runs typed concurrently at one spot never interleave; refusals for each kind of bad operation.
 
