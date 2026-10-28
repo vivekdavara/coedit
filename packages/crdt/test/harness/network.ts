@@ -18,8 +18,10 @@ export interface Replica<Op> {
   /** What gets compared across replicas at the end. */
   text(): string;
   /**
-   * The whole internal state, written canonically (ids, tombstones). If present it's compared too, after the text:
-   * replicas whose texts agree but whose hidden state differs will disagree on a later edit.
+   * The whole internal state, written canonically (ids, tombstones). A replica opts in to the state check by
+   * defining it (all replicas or none; `requireState` makes it compulsory): it's then compared after the text,
+   * since replicas whose texts agree but whose hidden state differs will disagree on a later edit, and it's part
+   * of the check that a step changed only its own replica.
    */
   state?(): string;
   /** Applies an operation sent by any replica, possibly this one, possibly again. */
@@ -57,6 +59,17 @@ export interface NetworkOptions {
   readonly localModel?: boolean;
   /** Steps in a schedule, at most. Default 30. */
   readonly maxSteps?: number;
+  /**
+   * Refuse to run unless every replica has `state()`. A replica opts in to the state check by defining it, so a
+   * subject that forgets would otherwise be checked on its text alone without anyone noticing. Default off.
+   */
+  readonly requireState?: boolean;
+  /**
+   * What the network does to an operation: applied once when it's sent and again for each delivery, so no two
+   * replicas (and no sender after sending) share an object. Default structuredClone. Day 2 passes the real codec
+   * (encode, then decode), so an operation that can't survive the wire fails here too.
+   */
+  readonly transport?: (op: unknown) => unknown;
 }
 
 export type Step =
@@ -83,8 +96,8 @@ export interface Schedule {
  */
 export const TEXT_UNITS = ['a', 'b', 'c', '😀', '\u0301'] as const;
 const TEXT_UNIT = fc.constantFrom(...TEXT_UNITS);
-export const MAX_INSERT = 5;
-export const MAX_DELETE = 5;
+export const MAX_INSERT: number = 5;
+export const MAX_DELETE: number = 5;
 
 /**
  * Replica names, in creation order. Ordered by UTF-16 code unit (what DESIGN.md specifies for ids) they go
@@ -160,9 +173,25 @@ export function run<Op, R extends Replica<Op>>(
   const reorder = options.reorder ?? true;
   const concurrency = options.concurrency ?? true;
   const echo = options.echo ?? true;
+  const transport = (options.transport ?? structuredClone) as (op: Op) => Op;
   const replicas = Array.from({ length: schedule.replicas }, (_, i) =>
     subject.create(replicaName(i)),
   );
+  const withState = replicas.filter((r) => typeof r.state === 'function').length;
+  if ((options.requireState ?? false) && withState < replicas.length) {
+    throw new Error(`${subject.name}: requireState is set, but not every replica has state()`);
+  }
+  if (withState > 0 && withState < replicas.length) {
+    throw new Error(`${subject.name}: some replicas have state() and some don't`);
+  }
+  /** Each replica's text and state, to check that a step changed only the replica it was meant to. */
+  const snapshot = () => replicas.map((r) => `${r.text()}\u0000${r.state?.() ?? ''}`);
+  const onlyChanged = (before: readonly string[], changed: number, what: string) => {
+    const after = snapshot();
+    for (let i = 0; i < replicas.length; i++) {
+      if (i !== changed && after[i] !== before[i]) fail(`${what} changed ${replicaName(i)} too`);
+    }
+  };
   const messages: Message<Op>[] = [];
   const inFlight: Delivery[] = [];
   const delivered: Delivery[] = [];
@@ -182,8 +211,11 @@ export function run<Op, R extends Replica<Op>>(
     );
     // Each delivery gets its own copy, as each replica on a real network decodes its own: a replica that kept
     // and changed a received object would otherwise change it for every replica (review 1 found a broken toy
-    // that passed that way).
-    (replicas[d.to] as R).receive(structuredClone(message.op));
+    // that passed that way). And a delivery may change only its target: replicas sharing state some other way
+    // (review 2: a cache of elements common to all replicas) are caught here.
+    const before = snapshot();
+    (replicas[d.to] as R).receive(transport(message.op));
+    onlyChanged(before, d.to, `${label} to ${replicaName(d.to)}`);
   };
 
   const deliverAt = (index: number, label: string) => {
@@ -212,7 +244,9 @@ export function run<Op, R extends Replica<Op>>(
         trace.push(
           `${replicaName(r)} edits: at ${index} delete ${deleteCount} insert ${JSON.stringify(step.text)}`,
         );
+        const others = snapshot();
         const ops = subject.edit(replica, index, deleteCount, step.text);
+        onlyChanged(others, r, `${replicaName(r)}'s local edit`);
         if (options.localModel ?? false) {
           const expected = [
             ...before.slice(0, index),
@@ -227,7 +261,7 @@ export function run<Op, R extends Replica<Op>>(
         }
         for (const op of ops) {
           // A copy of what was sent, so the sender changing its op afterwards changes nothing in flight.
-          const message = messages.push({ from: r, op: structuredClone(op) }) - 1;
+          const message = messages.push({ from: r, op: transport(op) }) - 1;
           for (let to = 0; to < schedule.replicas; to++) {
             if (to !== r || echo) inFlight.push({ message, to });
           }

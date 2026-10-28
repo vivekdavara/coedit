@@ -36,6 +36,39 @@ describe('default schedules', () => {
     assert.ok(share(lengths.filter((n) => n >= 15).length, SAMPLE.length) >= 0.2);
   });
 
+  test('let every replica edit, not just the first ones', () => {
+    // Among 4-replica schedules, each replica makes at least a sixth of the edits (review 2: edits by replicas 0 and
+    // 1 only passed everything else).
+    const four = SAMPLE.filter((s) => s.replicas === 4);
+    const byReplica = [0, 0, 0, 0];
+    for (const step of four.flatMap((s) => s.steps)) {
+      if (step.kind === 'edit')
+        byReplica[step.replica % 4] = (byReplica[step.replica % 4] ?? 0) + 1;
+    }
+    const total = byReplica.reduce((a, b) => a + b, 0);
+    for (const [i, n] of byReplica.entries()) {
+      assert.ok(share(n, total) >= 1 / 6, `replica ${i} made ${n} of ${total} edits`);
+    }
+  });
+
+  test('draw from an alphabet with repeats, a two-unit character and a combining mark, and edits up to 5', () => {
+    // The checks below compare against these constants, so the constants themselves are pinned here (review 2:
+    // narrowing TEXT_UNITS to two letters passed).
+    assert.ok(TEXT_UNITS.filter((u) => /^[a-z]$/.test(u)).length >= 3, TEXT_UNITS.join(' '));
+    assert.ok(
+      TEXT_UNITS.some((u) => u.length === 2 && Array.from(u).length === 1),
+      'no astral character',
+    );
+    assert.ok(
+      TEXT_UNITS.some((u) => /^\p{M}$/u.test(u)),
+      'no combining mark',
+    );
+    assert.ok(
+      MAX_INSERT >= 5 && MAX_DELETE >= 5,
+      `MAX_INSERT ${MAX_INSERT}, MAX_DELETE ${MAX_DELETE}`,
+    );
+  });
+
   test('insert every unit of the alphabet, in runs of every length up to the maximum', () => {
     const units = new Set(edits.flatMap((e) => Array.from(e.text)));
     assert.deepEqual([...units].sort(), [...TEXT_UNITS].sort());

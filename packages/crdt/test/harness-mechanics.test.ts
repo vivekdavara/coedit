@@ -50,6 +50,7 @@ const R0 = replicaName(0);
 const R1 = replicaName(1);
 /** Replica 0 types "a" then "b": two messages, in flight to replica 1 (and back to 0 if echo is on). */
 const twoSends: Step[] = [edit(0, 0, 'a'), edit(0, 1, 'b')];
+const threeSends: Step[] = [...twoSends, edit(0, 2, 'c')];
 const schedule = (steps: Step[], flush: number[] = [], replicas = 2): Schedule => ({
   replicas,
   steps,
@@ -81,15 +82,14 @@ describe('the simulator', () => {
   });
 
   test('a redelivery delivers the delivered message it picks', () => {
+    // Three delivered, and the middle one picked: not the first, not the last (review 2: a pick of 1 of 2 couldn't
+    // tell "the one picked" from "the last").
     const { subject, log } = recording();
-    const deliverBoth: Step[] = [
-      { kind: 'deliver', pick: 0 },
-      { kind: 'deliver', pick: 0 },
-    ];
-    run(subject, schedule([...twoSends, ...deliverBoth, { kind: 'duplicate', pick: 1 }]), {
+    const deliverAll: Step[] = [0, 0, 0].map((pick) => ({ kind: 'deliver', pick }));
+    run(subject, schedule([...threeSends, ...deliverAll, { kind: 'duplicate', pick: 1 }]), {
       echo: false,
     });
-    assert.deepEqual(log.get(R1), ['a', 'b', 'b']);
+    assert.deepEqual(log.get(R1), ['a', 'b', 'c', 'b']);
   });
 
   test('echo sends each message back to its sender once, unless switched off', () => {
@@ -136,5 +136,101 @@ describe('the simulator', () => {
       },
     };
     run(sloppy, schedule(twoSends), { echo: false });
+  });
+
+  test('a local edit may change only its own replica, and a delivery only its target', () => {
+    // A subject whose replicas share state some way other than through the operations (review 2's broken toy kept
+    // elements in a cache common to all replicas) shows it on the first step that changes a bystander.
+    const shared = { text: '' };
+    const leaky: Subject<SortedOp, SortedReplica> = {
+      ...sortedText,
+      create(name) {
+        const replica = sortedText.create(name);
+        if (name === R1) replica.text = () => shared.text;
+        return replica;
+      },
+      edit(replica, index, deleteCount, text) {
+        shared.text += text;
+        return sortedText.edit(replica, index, deleteCount, text);
+      },
+    };
+    assert.throws(
+      () => {
+        run(leaky, schedule([edit(0, 0, 'a')]));
+      },
+      new RegExp(`${R0}'s local edit changed ${R1} too`),
+    );
+  });
+
+  test('a delivery that changes a bystander is caught too', () => {
+    // Here the leak is in receive(), not in edit(): replica 1's text follows what every other replica receives.
+    const shared = { text: '' };
+    const editing = new Set<string>();
+    const leakyReceive: Subject<SortedOp, SortedReplica> = {
+      ...sortedText,
+      create(name) {
+        const replica = sortedText.create(name);
+        if (name === R1) replica.text = () => shared.text;
+        const receive = replica.receive.bind(replica);
+        replica.receive = (op) => {
+          if (!editing.has(name) && name !== R1 && op.kind === 'insert') shared.text += op.char;
+          receive(op);
+        };
+        return replica;
+      },
+      edit(replica, index, deleteCount, text) {
+        editing.add(replica.name);
+        try {
+          return sortedText.edit(replica, index, deleteCount, text);
+        } finally {
+          editing.delete(replica.name);
+        }
+      },
+    };
+    assert.throws(
+      () => {
+        run(leakyReceive, schedule([edit(0, 0, 'a')], [], 3), { echo: false });
+      },
+      new RegExp(`flush to ${replicaName(2)} changed ${R1} too`),
+    );
+  });
+
+  test('a replica opts in to the state check: all replicas or none, and requireState insists', () => {
+    const someWithout: Subject<SortedOp, SortedReplica> = {
+      ...sortedText,
+      create: (name) =>
+        name === R1
+          ? Object.assign(sortedText.create(name), { state: undefined })
+          : sortedText.create(name),
+    };
+    assert.throws(() => {
+      run(someWithout, schedule([]));
+    }, /some replicas have state\(\) and some don't/);
+    const noneWith: Subject<SortedOp, SortedReplica> = {
+      ...sortedText,
+      create: (name) => Object.assign(sortedText.create(name), { state: undefined }),
+    };
+    run(noneWith, schedule([]));
+    assert.throws(() => {
+      run(noneWith, schedule([]), { requireState: true });
+    }, /requireState is set, but not every replica has state\(\)/);
+    run(sortedText, schedule([]), { requireState: true });
+  });
+
+  test('the transport is applied once at send and once per delivery', () => {
+    let calls = 0;
+    const transport = (op: unknown) => {
+      calls++;
+      return structuredClone(op);
+    };
+    // Two ops sent, each delivered to both replicas (echo on), then one redelivery: 2 + 4 + 1.
+    run(
+      sortedText,
+      schedule([...twoSends, { kind: 'deliver', pick: 0 }, { kind: 'duplicate', pick: 0 }]),
+      {
+        transport,
+      },
+    );
+    assert.equal(calls, 7);
   });
 });
