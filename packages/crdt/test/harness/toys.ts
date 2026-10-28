@@ -134,19 +134,13 @@ export const dropsLocalTombstones = sorted('sorted text, drops local tombstones'
 
 // ---- By index: operations name positions, as a plain text editor's undo log would ----
 
-type IndexOp =
-  | {
-      readonly kind: 'insert';
-      readonly opId: string;
-      readonly index: number;
-      readonly text: string;
-    }
-  | {
-      readonly kind: 'delete';
-      readonly opId: string;
-      readonly index: number;
-      readonly count: number;
-    };
+/** One edit: delete `deleteCount` at `index`, then insert `text` there. */
+interface IndexOp {
+  readonly opId: string;
+  readonly index: number;
+  readonly deleteCount: number;
+  readonly text: string;
+}
 
 class IndexReplica implements Replica<IndexOp> {
   readonly name: string;
@@ -163,12 +157,12 @@ class IndexReplica implements Replica<IndexOp> {
   }
 
   receive(op: IndexOp): void {
-    // Idempotent and tolerant of positions past the end, so concurrency is its only flaw.
+    // Idempotent, tolerant of positions past the end, and one operation per edit (so an edit's delete and insert
+    // can't arrive in the wrong order): concurrency is its only flaw.
     if (this.seen.has(op.opId)) return;
     this.seen.add(op.opId);
     const index = Math.min(op.index, this.codePoints.length);
-    if (op.kind === 'insert') this.codePoints.splice(index, 0, ...Array.from(op.text));
-    else this.codePoints.splice(index, op.count);
+    this.codePoints.splice(index, op.deleteCount, ...Array.from(op.text));
   }
 }
 
@@ -177,18 +171,8 @@ export const byIndex: Subject<IndexOp, IndexReplica> = {
   name: 'text by index',
   create: (name) => new IndexReplica(name),
   edit(replica, index, deleteCount, text) {
-    const ops: IndexOp[] = [];
-    if (deleteCount > 0) {
-      ops.push({
-        kind: 'delete',
-        opId: `${replica.name}.${replica.nextOp++}`,
-        index,
-        count: deleteCount,
-      });
-    }
-    if (text !== '')
-      ops.push({ kind: 'insert', opId: `${replica.name}.${replica.nextOp++}`, index, text });
-    for (const op of ops) replica.receive(op);
-    return ops;
+    const op: IndexOp = { opId: `${replica.name}.${replica.nextOp++}`, index, deleteCount, text };
+    replica.receive(op);
+    return [op];
   },
 };

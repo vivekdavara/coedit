@@ -160,7 +160,10 @@ export function run<Op, R extends Replica<Op>>(
     trace.push(
       `${label} #${d.message} (from r${message.from}) to r${d.to}: ${JSON.stringify(message.op)}`,
     );
-    (replicas[d.to] as R).receive(message.op);
+    // Each delivery gets its own copy, as each replica on a real network decodes its own: a replica that kept
+    // and changed a received object would otherwise change it for every replica (review 1 found a broken toy
+    // that passed that way).
+    (replicas[d.to] as R).receive(structuredClone(message.op));
   };
 
   const deliverAt = (index: number, label: string) => {
@@ -203,7 +206,8 @@ export function run<Op, R extends Replica<Op>>(
           }
         }
         for (const op of ops) {
-          const message = messages.push({ from: r, op }) - 1;
+          // A copy of what was sent, so the sender changing its op afterwards changes nothing in flight.
+          const message = messages.push({ from: r, op: structuredClone(op) }) - 1;
           for (let to = 0; to < schedule.replicas; to++) {
             if (to !== r || echo) inFlight.push({ message, to });
           }
