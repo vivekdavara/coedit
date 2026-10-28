@@ -133,8 +133,8 @@ describe('failures', () => {
       const message = (details.errorInstance as Error).message;
       const steps = message.split('\nsteps:\n')[1]?.split('\n') ?? [];
       assert.ok(steps.length <= 9, `seed ${seed}: ${message}`);
-      assert.match(message, /^text by index: replicas diverged\nreplicas now:\n {2}r0: /);
-      assert.match(message, /r\d edits: at \d+ delete \d+ insert /);
+      assert.match(message, /^text by index: replicas diverged\nreplicas now:\n {2}m: /);
+      assert.match(message, /\n {2}\w+ edits: at \d+ delete \d+ insert /);
     }
   });
 
@@ -147,10 +147,11 @@ describe('failures', () => {
       ],
       flush: [],
     } as const;
-    // r0 has "a", r1 has "b"; by index, each then inserts the other's text at 0: "ba" against "ab".
+    // m (replica 0) has "a", Z (replica 1) has "b"; by index, each then inserts the other's text at 0: "ba"
+    // against "ab".
     assert.throws(() => {
       run(byIndex, schedule, { echo: false });
-    }, /replicas diverged\nreplicas now:\n {2}r0: "ba"\n {2}r1: "ab"/);
+    }, /replicas diverged\nreplicas now:\n {2}m: "ba"\n {2}Z: "ab"/);
     run(sortedText, schedule);
   });
 });

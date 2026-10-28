@@ -4,7 +4,7 @@
 // replicas) with every test still passing.
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { run, type Schedule, type Step, type Subject } from './harness/network.ts';
+import { replicaName, run, type Schedule, type Step, type Subject } from './harness/network.ts';
 import { sortedText } from './harness/toys.ts';
 
 type SortedReplica = ReturnType<typeof sortedText.create>;
@@ -46,7 +46,9 @@ const edit = (replica: number, at: number, text: string): Step => ({
   deleteCount: 0,
   text,
 });
-/** r0 types "a" then "b": two messages, in flight to r1 (and back to r0 if echo is on). */
+const R0 = replicaName(0);
+const R1 = replicaName(1);
+/** Replica 0 types "a" then "b": two messages, in flight to replica 1 (and back to 0 if echo is on). */
 const twoSends: Step[] = [edit(0, 0, 'a'), edit(0, 1, 'b')];
 const schedule = (steps: Step[], flush: number[] = [], replicas = 2): Schedule => ({
   replicas,
@@ -58,13 +60,13 @@ describe('the simulator', () => {
   test('a deliver step delivers the in-flight message it picks', () => {
     const { subject, log } = recording();
     run(subject, schedule([...twoSends, { kind: 'deliver', pick: 1 }]), { echo: false });
-    assert.deepEqual(log.get('r1'), ['b', 'a']);
+    assert.deepEqual(log.get(R1), ['b', 'a']);
   });
 
   test('the flush delivers in the order its picks say', () => {
     const { subject, log } = recording();
     run(subject, schedule(twoSends, [1]), { echo: false });
-    assert.deepEqual(log.get('r1'), ['b', 'a']);
+    assert.deepEqual(log.get(R1), ['b', 'a']);
   });
 
   test('past its picks, and with reorder off, the flush goes oldest first', () => {
@@ -74,7 +76,7 @@ describe('the simulator', () => {
     ] as const) {
       const { subject, log } = recording();
       run(subject, schedule(twoSends, [...flush]), { echo: false, ...options });
-      assert.deepEqual(log.get('r1'), ['a', 'b']);
+      assert.deepEqual(log.get(R1), ['a', 'b']);
     }
   });
 
@@ -87,15 +89,15 @@ describe('the simulator', () => {
     run(subject, schedule([...twoSends, ...deliverBoth, { kind: 'duplicate', pick: 1 }]), {
       echo: false,
     });
-    assert.deepEqual(log.get('r1'), ['a', 'b', 'b']);
+    assert.deepEqual(log.get(R1), ['a', 'b', 'b']);
   });
 
   test('echo sends each message back to its sender once, unless switched off', () => {
     for (const echo of [true, false]) {
       const { subject, log } = recording();
       run(subject, schedule(twoSends), { echo });
-      assert.deepEqual(log.get('r0'), echo ? ['a', 'b'] : [], `echo ${echo}`);
-      assert.deepEqual(log.get('r1'), ['a', 'b']);
+      assert.deepEqual(log.get(R0), echo ? ['a', 'b'] : [], `echo ${echo}`);
+      assert.deepEqual(log.get(R1), ['a', 'b']);
     }
   });
 
@@ -104,7 +106,7 @@ describe('the simulator', () => {
       ...sortedText,
       create(name) {
         const replica = sortedText.create(name);
-        if (name === 'r3') {
+        if (name === replicaName(3)) {
           if (field === 'text') replica.text = () => 'x';
           else replica.state = () => 'different';
         }

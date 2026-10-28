@@ -77,8 +77,24 @@ export interface Schedule {
   readonly flush: readonly number[];
 }
 
-/** Small alphabets make concurrent edits at the same spot common; the emoji is two UTF-16 units, one code point. */
-const TEXT_UNIT = fc.constantFrom('a', 'b', 'c', '😀');
+/**
+ * Small alphabets make concurrent edits at the same spot common. The emoji is two UTF-16 units and one code point;
+ * U+0301 is a combining accent, one code point that joins the one before it on screen.
+ */
+export const TEXT_UNITS = ['a', 'b', 'c', '😀', '\u0301'] as const;
+const TEXT_UNIT = fc.constantFrom(...TEXT_UNITS);
+export const MAX_INSERT = 5;
+export const MAX_DELETE = 5;
+
+/**
+ * Replica names, in creation order. Ordered by UTF-16 code unit (what DESIGN.md specifies for ids) they go
+ * B Z a_ b m mm; by localeCompare, a_ b B m mm Z; by creation, m Z b B mm a_. Within one process a comparator used
+ * consistently converges whatever order it gives, so the convergence check can't tell them apart; what these
+ * names do is make a direct test of the CRDT's id order (day 2) meaningful, and vary case and length. Names past
+ * the sixth are r6, r7, ...
+ */
+export const REPLICA_NAMES = ['m', 'Z', 'b', 'B', 'mm', 'a_'] as const;
+export const replicaName = (i: number): string => REPLICA_NAMES[i] ?? `r${i}`;
 
 export function schedules(options: NetworkOptions = {}): fc.Arbitrary<Schedule> {
   const [min, max] = options.replicas ?? [2, 4];
@@ -87,8 +103,8 @@ export function schedules(options: NetworkOptions = {}): fc.Arbitrary<Schedule> 
       kind: fc.constant('edit' as const),
       replica: fc.nat({ max: max - 1 }),
       at: fc.nat(),
-      deleteCount: fc.nat({ max: 3 }),
-      text: fc.string({ unit: TEXT_UNIT, maxLength: 3 }),
+      deleteCount: fc.nat({ max: MAX_DELETE }),
+      text: fc.string({ unit: TEXT_UNIT, maxLength: MAX_INSERT }),
     },
     { noNullPrototype: true },
   );
@@ -144,14 +160,16 @@ export function run<Op, R extends Replica<Op>>(
   const reorder = options.reorder ?? true;
   const concurrency = options.concurrency ?? true;
   const echo = options.echo ?? true;
-  const replicas = Array.from({ length: schedule.replicas }, (_, i) => subject.create(`r${i}`));
+  const replicas = Array.from({ length: schedule.replicas }, (_, i) =>
+    subject.create(replicaName(i)),
+  );
   const messages: Message<Op>[] = [];
   const inFlight: Delivery[] = [];
   const delivered: Delivery[] = [];
   const trace: string[] = [];
 
   const fail = (problem: string): never => {
-    const texts = replicas.map((r, i) => `  r${i}: ${JSON.stringify(r.text())}`);
+    const texts = replicas.map((r, i) => `  ${replicaName(i)}: ${JSON.stringify(r.text())}`);
     throw new ConvergenceError(
       `${subject.name}: ${problem}\nreplicas now:\n${texts.join('\n')}\nsteps:\n${trace.map((t) => `  ${t}`).join('\n')}`,
     );
@@ -160,7 +178,7 @@ export function run<Op, R extends Replica<Op>>(
   const deliver = (d: Delivery, label: string) => {
     const message = messages[d.message] as Message<Op>;
     trace.push(
-      `${label} #${d.message} (from r${message.from}) to r${d.to}: ${JSON.stringify(message.op)}`,
+      `${label} #${d.message} (from ${replicaName(message.from)}) to ${replicaName(d.to)}: ${JSON.stringify(message.op)}`,
     );
     // Each delivery gets its own copy, as each replica on a real network decodes its own: a replica that kept
     // and changed a received object would otherwise change it for every replica (review 1 found a broken toy
@@ -192,7 +210,7 @@ export function run<Op, R extends Replica<Op>>(
         const deleteCount = Math.min(step.deleteCount, before.length - index);
         if (deleteCount === 0 && step.text === '') break;
         trace.push(
-          `r${r} edits: at ${index} delete ${deleteCount} insert ${JSON.stringify(step.text)}`,
+          `${replicaName(r)} edits: at ${index} delete ${deleteCount} insert ${JSON.stringify(step.text)}`,
         );
         const ops = subject.edit(replica, index, deleteCount, step.text);
         if (options.localModel ?? false) {
@@ -203,7 +221,7 @@ export function run<Op, R extends Replica<Op>>(
           ].join('');
           if (replica.text() !== expected) {
             fail(
-              `r${r}'s local edit gave ${JSON.stringify(replica.text())}, not ${JSON.stringify(expected)}`,
+              `${replicaName(r)}'s local edit gave ${JSON.stringify(replica.text())}, not ${JSON.stringify(expected)}`,
             );
           }
         }
@@ -231,7 +249,7 @@ export function run<Op, R extends Replica<Op>>(
   if (texts.some((t) => t !== texts[0])) fail('replicas diverged');
   const states = replicas.map((r) => r.state?.());
   if (states.some((s) => s !== states[0])) {
-    const lines = states.map((s, i) => `  r${i}: ${String(s)}`).join('\n');
+    const lines = states.map((s, i) => `  ${replicaName(i)}: ${String(s)}`).join('\n');
     fail(`replicas' states diverged (their texts agree):\n${lines}`);
   }
 }
