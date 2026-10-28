@@ -160,8 +160,13 @@ Delete  = { "type": "delete", "spans": [ { "replica": string, "counter": integer
 - `text`: 1 to 10,000 code points, well-formed UTF-16 (JSON can carry a lone surrogate as `"\ud800"`; that's
   refused). A run's last counter, `counter + length - 1`, must stay in the safe range.
 - `spans`: 1 to 1,000 spans, each `length` 1 to 10,000, last counter in the safe range.
-- Duplicate keys and unknown keys are refused. `JSON.parse` keeps the last of duplicate keys, so the decoder works on
-  the text, not on a parsed object, for that check.
+- Unknown and missing keys are refused; key order and whitespace don't matter to the decoder, and the encoder always
+  writes one canonical text (keys in the order above, no whitespace).
+- The decoder reads JSON with its own strict reader (`packages/crdt/src/json.ts`), not `JSON.parse`, which keeps the
+  last of duplicate keys, returns lone surrogates, and rounds what it can't hold (`9007199254740993`, `1e400`, `-0`).
+  The reader refuses all of those, plus fractions and exponents (every number here is an integer), a byte order mark
+  and nesting deeper than 32. Where it accepts a text it gives the same value as `JSON.parse`.
+- The encoder runs the same checks before writing, so a replica can't send what the others would refuse.
 
 ## The sync protocol (day 3)
 

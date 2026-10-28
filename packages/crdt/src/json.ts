@@ -61,7 +61,7 @@ class Reader {
   }
 
   fail(message: string, at: number = this.pos): never {
-    throw new JsonError(message, at);
+    throw new JsonError(at >= this.text.length ? 'unexpected end of text' : message, at);
   }
 
   skipWhitespace(): void {
