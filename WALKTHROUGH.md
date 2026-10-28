@@ -133,6 +133,13 @@ toys fail under weak schedules too. The review weakened the generator six ways w
 is measuring the schedules directly (`harness-coverage.test.ts`) and testing each delivery mechanism on hand-written
 schedules (`harness-mechanics.test.ts`); every survivor was then re-run as a mutant and fails.
 
-**Did your fixes break anything?** One, found before the second review: the copies made `harness-stats` count
-operations by identity on objects that were now fresh copies, so it reported 0.0 redeliveries. The numbers in the
-README were re-measured after fixing it.
+**Did your fixes break anything?** Yes, twice, and the second review found it. My copy of a caller's array read its
+length live, so an array that grows while it's read got past the 1,000-item limit; and my fix for shared op objects
+closed only that one channel: replicas sharing a cache of elements still passed, until the simulator started
+checking that each step changes only the replica it's meant to. I found a third myself: the copies made
+`harness-stats` count operations by identity on fresh copies (0.0 redeliveries). The README's numbers were
+re-measured after each.
+
+**What does the isolation check cost?** It snapshots every replica's text and state after every step, which made the
+self-test 13 times slower at first (5.4 s against 0.4 s). Reusing each step's snapshot as the next one's "before"
+halved it; the whole suite is under 4 s.

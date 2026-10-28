@@ -77,7 +77,7 @@ the edit each input became.
 Measured on an Apple M3 (macOS 26.6.2, Node 23.11.0, on AC, awake throughout). All inputs are synthetic.
 
 - **The simulator catches each broken toy CRDT within a few schedules**, and only with the freedom (or check) that
-  exposes it (`npm run harness-stats -w @coedit/crdt -- 2000 200` at `102e41a`; schedules fast-check ran up to and
+  exposes it (`npm run harness-stats -w @coedit/crdt -- 2000 200` at `102e41a`, and the same at `7ae190c`; schedules fast-check ran up to and
   including the first failure, over 200 seeds; every seed caught every toy):
 
   | Broken toy                           | Exposed by       | Median | p95 | Max |
@@ -111,8 +111,10 @@ Measured on an Apple M3 (macOS 26.6.2, Node 23.11.0, on AC, awake throughout). A
   Before the profile-driven change in `5c6354f` the paste took 6,613 µs to decode and 5,231 µs to encode: a third of
   the time was the reader's character loop and a quarter was counting code points twice per insert.
 
-- **Tests**: 111 in 30 suites, 1.5 s for the whole suite (`npm test`). The must-pass simulator properties also passed
-  at 20,000 schedules each (a one-off run, 0.3 to 2.4 s per case).
+- **Tests**: 138 in 31 suites, 3.9 s for the whole suite (`npm test`, at `d7eb9bb`); 2.6 s of it is the simulator's
+  self-test, whose check that each step changed only its own replica snapshots every replica once a step (without
+  snapshots it takes 0.4 s). The must-pass simulator properties also passed at 20,000 schedules each (a one-off run
+  at `c1d40d0`, 0.3 to 2.4 s per case).
 
 ## Tests
 
@@ -125,16 +127,18 @@ Measured on an Apple M3 (macOS 26.6.2, Node 23.11.0, on AC, awake throughout). A
 - `packages/crdt/test/harness.test.ts`: the simulator's self-test in both directions (a correct toy passes; four broken
   ones fail only with the freedom that exposes them), shrinking on fixed seeds, replay.
 - `packages/crdt/test/harness-mechanics.test.ts`: each delivery mechanism on hand-written schedules (picks, flush
-  order, redelivery, echo, every replica compared, a sender's later changes not reaching the network).
+  order, redelivery, echo, every replica compared, a sender's later changes not reaching the network, a step that
+  changes a bystander, the `state()` opt-in, the transport).
 - `packages/crdt/test/harness-coverage.test.ts`: what 2,000 default schedules contain (replica counts, lengths, every
   alphabet unit and edit size, positions at the start, middle and end of real text).
 - `packages/client/test/edit.test.ts`: any caret gives a correct edit; minimal without a caret; a random edit with the
   browser's caret comes back exactly; UTF-16/code-point conversion at every boundary.
 - `packages/server/test/`: health, HEAD, 405, 404, the default bind address, a taken port, close mid-request, port
   parsing; `main.test.ts` runs the command line as a child process (signals, exit codes, IPv6).
-- `test/docs.test.ts`: every npm script, repo path, port and response the docs quote exists and matches the code;
+- `test/docs.test.ts` (parsing in `test/docs.ts`): every npm script, workspace, repo path and `:line` the docs name
+  exists, and the ports and response they quote are the code's; the parser is also tested on twelve bad fragments.
   `test/exports.test.ts`: every workspace export imports.
-- `review1-*.test.ts`: the first review's findings, each of which failed before its fix.
+- `review1-*.test.ts`, `review2-*.test.ts`: the reviews' findings, each of which failed before its fix.
 
 ## Review of day 1
 
@@ -163,7 +167,23 @@ position 0, one-letter inserts...), which the self-test can't see because weak s
 `harness-coverage.test.ts` and `harness-mechanics.test.ts` pin them now. Every listed survivor was re-run here as a
 mutant afterwards and fails a test.
 
-**Round 2** (on the fixes) is in the session log, PROGRESS.md.
+**Round 2** (on everything since `e688359`, round 1's fixes included; 11 minutes) found 4 more, two of them in round
+1's fixes:
+
+1. **The array copy of `02940be` read the length live**, so an array whose index getter appends to it grew past the
+   1,000-item limit while being copied (`f364ec0`).
+2. **Replicas could still share state another way**: a toy keeping elements in a cache common to all replicas (a
+   static Map of nodes) passed 2,000 schedules. The simulator now checks that a local edit changes only its own
+   replica and a delivery only its target (`de9e787`; halved in cost in `d7eb9bb`). Also from it: `state()` all or
+   none, a `requireState` option, a pluggable transport.
+3. The docs test missed seven forms of command and path, each now tested (`d12991c`).
+4. A failing server test hung the suite and left `main.ts` listening; children are now killed in cleanup and `npm
+test` has a per-test timeout (`c646344`).
+
+Its eleven surviving mutants (the control-character range edges, three of them; the skip-count bound; edits only by
+replicas 0 and 1; the alphabet constant, two ways; redelivery of the last message; `state()` skipped when one replica
+lacks it; a rounded caret; the IPv6 bind message) were each
+re-run here after the new tests: all fail a test.
 
 I found one more myself: the per-delivery copies broke `harness-stats`' counting, which recognised operations by
 identity (0.0 redeliveries; echoes counted as receipts); fixed in `102e41a`, and every number above re-measured after
@@ -185,6 +205,8 @@ support this machine's Node 23).
   with `npm ci` on Node 23; Node 22 and 24, which CI uses, are not installed here.
 - The simulator's convergence check can't catch an id comparison that is wrong only across machines (such as
   `localeCompare`): within one process a comparator used consistently converges. Day 2 tests the id order directly.
+- Its default transport (`structuredClone`) keeps Maps, BigInts and -0, which JSON on the wire wouldn't; day 2 should
+  pass the real codec as the transport.
 - Measurements are from one laptop; the decode numbers are single-threaded microbenchmarks on synthetic messages.
 
 ## License
