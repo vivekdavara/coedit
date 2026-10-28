@@ -31,10 +31,18 @@ body {
 
 .editor textarea {
   flex: 1;
-  margin-bottom: 1rem;
+  margin-bottom: 0.5rem;
   padding: 0.75rem;
   font:
     1rem/1.5 ui-monospace,
     monospace;
   resize: none;
+}
+
+.last-edit {
+  margin-bottom: 1rem;
+  font:
+    0.875rem ui-monospace,
+    monospace;
+  opacity: 0.7;
 }
