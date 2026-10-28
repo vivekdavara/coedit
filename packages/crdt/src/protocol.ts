@@ -249,8 +249,11 @@ function op(value: JsonValue, path: string): Op {
     const opId = id(m['id'], `${path}.id`);
     const origin = m['origin'] === null ? null : id(m['origin'], `${path}.origin`);
     const insertText = text(m['text'], `${path}.text`, 1, MAX_INSERT_LENGTH);
-    // The elements' counters run from id.counter to id.counter + length - 1.
-    lastCounter(opId.counter, codePoints(insertText), `${path}.text`);
+    // The elements' counters run from id.counter to id.counter + length - 1. text() has checked the length, so
+    // with counters at most MAX - MAX_INSERT_LENGTH + 1 nothing can overflow and the second count is skipped.
+    if (opId.counter > Number.MAX_SAFE_INTEGER - MAX_INSERT_LENGTH + 1) {
+      lastCounter(opId.counter, codePoints(insertText), `${path}.text`);
+    }
     if (origin !== null && origin.counter >= opId.counter) {
       // RGA's ordering rule is only the same everywhere if every element's counter exceeds its origin's
       // (DESIGN.md "Insert").

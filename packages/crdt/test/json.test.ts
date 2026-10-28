@@ -61,6 +61,26 @@ describe('parseJson accepts', () => {
     assert.equal(({} as Record<string, unknown>)['polluted'], undefined);
   });
 
+  test('long strings, with escapes and quotes on both sides of the 16-character scan window', () => {
+    // The reader scans the first 16 characters of a run one by one and the rest with a regex.
+    for (let n = 0; n <= 40; n++) {
+      for (const special of ['\\n', '\\"', '\\\\', '\\u00e9', '\\ud83d\\ude00', '😀']) {
+        const text = `"${'x'.repeat(n)}${special}${'y'.repeat(n)}"`;
+        assert.equal(parseJson(text), JSON.parse(text), text);
+      }
+      refused(`"${'x'.repeat(n)}\u0001"`, /control character/);
+      refused(`"${'x'.repeat(n)}`, /unterminated string at offset 0/);
+      refused(`"${'x'.repeat(n)}\\`, /bad escape/);
+      refused(`["${'x'.repeat(n)}"`, /unexpected end/);
+    }
+    fc.assert(
+      fc.property(fc.string({ unit: 'binary', minLength: 10, maxLength: 80 }), (s) => {
+        const text = JSON.stringify(s);
+        assert.equal(parseJson(text), s);
+      }),
+    );
+  });
+
   test(`nesting up to ${MAX_DEPTH} levels`, () => {
     const text = '['.repeat(MAX_DEPTH) + ']'.repeat(MAX_DEPTH);
     same(parseJson(text), JSON.parse(text));

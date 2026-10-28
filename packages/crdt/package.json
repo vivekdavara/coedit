@@ -10,6 +10,7 @@
     "./protocol": "./src/protocol.ts"
   },
   "scripts": {
-    "harness-stats": "node --disable-warning=ExperimentalWarning scripts/harness_stats.ts"
+    "harness-stats": "node --disable-warning=ExperimentalWarning scripts/harness_stats.ts",
+    "bench-codec": "node --disable-warning=ExperimentalWarning scripts/bench_codec.ts"
   }
 }

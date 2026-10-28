@@ -40,6 +40,9 @@ export function parseJson(text: string): JsonValue {
 }
 
 const INTEGER = /-?(0|[1-9][0-9]*)/y;
+/** What ends a run of plain string content: the closing quote, an escape, or a control character (refused). */
+// eslint-disable-next-line no-control-regex -- matching control characters is the point: they must be refused.
+const SPECIAL = /["\\\u0000-\u001f]/g;
 
 const ESCAPES: Record<string, string> = {
   '"': '"',
@@ -170,6 +173,7 @@ class Reader {
     let result = '';
     let chunk = this.pos;
     for (;;) {
+      this.pos = this.nextSpecial(this.pos);
       if (this.pos >= text.length) this.fail('unterminated string', start);
       const c = text.charCodeAt(this.pos);
       if (c === 0x22) {
@@ -178,10 +182,6 @@ class Reader {
         break;
       }
       if (c < 0x20) this.fail('control character in a string (it must be escaped)');
-      if (c !== 0x5c) {
-        this.pos++;
-        continue;
-      }
       result += text.slice(chunk, this.pos);
       const escape = text[this.pos + 1];
       if (escape === 'u') {
@@ -201,6 +201,24 @@ class Reader {
     // the half came escaped or raw.
     if (!result.isWellFormed()) this.fail('lone surrogate in a string', start);
     return result;
+  }
+
+  /**
+   * The offset of the next quote, backslash or control character from `from` on, or the text's length. Short runs
+   * (keys, ids) are quickest to scan character by character, long ones (pasted text) with a native regex scan: a
+   * charCodeAt loop over everything was a third of the time spent decoding a large paste, and a regex for
+   * everything made a keystroke's message 20% slower.
+   */
+  nextSpecial(from: number): number {
+    const { text } = this;
+    const end = Math.min(text.length, from + 16);
+    for (let i = from; i < end; i++) {
+      const c = text.charCodeAt(i);
+      if (c === 0x22 || c === 0x5c || c < 0x20) return i;
+    }
+    if (end === text.length) return end;
+    SPECIAL.lastIndex = end;
+    return SPECIAL.exec(text)?.index ?? text.length;
   }
 
   number(): number {
