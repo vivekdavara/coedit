@@ -31,27 +31,33 @@ const counts = {
   chars: 0,
 };
 for (const schedule of fc.sample(schedules(), { numRuns: samples, seed: 1 })) {
-  const sender = new Map<object, string>();
-  const received = new Map<string, Set<object>>();
+  // Each sent op carries a tag, because the simulator delivers copies: object identity means nothing (counting by
+  // identity, after the copies went in, gave 0 redeliveries and counted echoes as receipts from others).
+  type Tagged = { readonly tag: number };
+  const sender = new Map<number, string>(); // tag -> the replica that sent it
+  const fromOthers = new Map<string, Set<number>>(); // replica -> tags of others' ops it has received
+  const delivered = new Map<string, Set<number>>(); // replica -> tags it has received at all
   const here = { concurrent: false };
   let editing = false;
+  let nextTag = 0;
   type R = Replica<object> & { name: string };
   const inner = sortedText as unknown as Subject<object, R>;
   const counting: Subject<object, R> = {
     name: 'counting',
     create(name) {
       const replica = inner.create(name);
-      received.set(name, new Set());
+      fromOthers.set(name, new Set());
+      delivered.set(name, new Set());
       const receive = replica.receive.bind(replica);
       replica.receive = (op) => {
         // The toy applies its own edits through receive(); those aren't deliveries.
-        if (editing) {
-          receive(op);
-          return;
+        if (!editing) {
+          const { tag } = op as Tagged;
+          const seen = delivered.get(name) as Set<number>;
+          if (seen.has(tag)) counts.redeliveries++;
+          seen.add(tag);
+          if (sender.get(tag) !== name) fromOthers.get(name)?.add(tag);
         }
-        const seen = received.get(name) as Set<object>;
-        if (seen.has(op)) counts.redeliveries++;
-        if (sender.get(op) !== name) seen.add(op);
         receive(op);
       };
       return replica;
@@ -59,14 +65,16 @@ for (const schedule of fc.sample(schedules(), { numRuns: samples, seed: 1 })) {
     edit(replica, index, deleteCount, text) {
       counts.edits++;
       const othersSent = [...sender.values()].filter((s) => s !== replica.name).length;
-      if ((received.get(replica.name) as Set<object>).size < othersSent) {
+      if ((fromOthers.get(replica.name) as Set<number>).size < othersSent) {
         counts.concurrent++;
         here.concurrent = true;
       }
       editing = true;
-      const ops = inner.edit(replica, index, deleteCount, text);
+      const ops = inner
+        .edit(replica, index, deleteCount, text)
+        .map((op) => ({ ...op, tag: nextTag++ }));
       editing = false;
-      for (const op of ops) sender.set(op, replica.name);
+      for (const op of ops) sender.set(op.tag, replica.name);
       return ops;
     },
   };
