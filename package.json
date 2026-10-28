@@ -14,10 +14,10 @@
     "node": ">=22.18.0"
   },
   "scripts": {
-    "typecheck": "tsc -p packages/crdt && tsc -p packages/server && tsc -p packages/client",
+    "typecheck": "tsc -p tsconfig.json && tsc -p packages/crdt && tsc -p packages/server && tsc -p packages/client",
     "lint": "eslint . --max-warnings 0 && prettier --check .",
     "format": "prettier --write .",
-    "test": "node --disable-warning=ExperimentalWarning --test \"packages/*/test/**/*.test.ts\"",
+    "test": "node --disable-warning=ExperimentalWarning --test \"test/*.test.ts\" \"packages/*/test/**/*.test.ts\"",
     "build": "npm run build -w @coedit/client",
     "check": "npm run typecheck && npm run lint && npm run test && npm run build"
   },
