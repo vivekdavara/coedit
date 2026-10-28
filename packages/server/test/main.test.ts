@@ -4,7 +4,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
-import { describe, test } from 'node:test';
+import { describe, test, type TestContext } from 'node:test';
 import { hostPort } from '../src/config.ts';
 
 const MAIN = fileURLToPath(new URL('../src/main.ts', import.meta.url));
@@ -16,7 +16,11 @@ interface Run {
   exit: Promise<number | null>;
 }
 
-function start(env: Record<string, string>): Run {
+/**
+ * Starts main.ts. The child is killed when the test ends, however it ends: a failed assertion before the test's own
+ * kill would otherwise leave it listening and the test file waiting on it (review 2 saw both).
+ */
+function start(t: TestContext, env: Record<string, string>): Run {
   const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', MAIN], {
     env: { PATH: process.env['PATH'] ?? '', ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -26,6 +30,9 @@ function start(env: Record<string, string>): Run {
   child.stdout.setEncoding('utf8').on('data', (chunk: string) => (out += chunk));
   child.stderr.setEncoding('utf8').on('data', (chunk: string) => (err += chunk));
   const exit = once(child, 'exit').then(([code]) => code as number | null);
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  });
   return { child, stdout: () => out, stderr: () => err, exit };
 }
 
@@ -46,8 +53,8 @@ async function listening(run: Run): Promise<string> {
 }
 
 describe('main', () => {
-  test('serves /healthz on the port it prints, and exits 0 on SIGINT', async () => {
-    const run = start({ COEDIT_PORT: '0' });
+  test('serves /healthz on the port it prints, and exits 0 on SIGINT', async (t) => {
+    const run = start(t, { COEDIT_PORT: '0' });
     const url = await listening(run);
     assert.match(url, /^http:\/\/127\.0\.0\.1:\d+$/);
     const response = await fetch(`${url}/healthz`);
@@ -58,8 +65,8 @@ describe('main', () => {
     assert.match(run.stdout(), /SIGINT: closing/);
   });
 
-  test('exits 0 on SIGTERM', async () => {
-    const run = start({ COEDIT_PORT: '0' });
+  test('exits 0 on SIGTERM', async (t) => {
+    const run = start(t, { COEDIT_PORT: '0' });
     await listening(run);
     run.child.kill('SIGTERM');
     assert.equal(await run.exit, 0);
@@ -80,7 +87,7 @@ describe('main', () => {
       t.skip('no IPv6 loopback here');
       return;
     }
-    const run = start({ COEDIT_HOST: '::1', COEDIT_PORT: '0' });
+    const run = start(t, { COEDIT_HOST: '::1', COEDIT_PORT: '0' });
     const url = await listening(run);
     assert.match(url, /^http:\/\/\[::1\]:\d+$/);
     const response = await fetch(`${url}/healthz`);
@@ -90,27 +97,27 @@ describe('main', () => {
     assert.equal(await run.exit, 0);
   });
 
-  test('refuses a bad COEDIT_PORT with exit 2', async () => {
+  test('refuses a bad COEDIT_PORT with exit 2', async (t) => {
     for (const port of ['08110', '65536', 'abc', '']) {
-      const run = start({ COEDIT_PORT: port });
+      const run = start(t, { COEDIT_PORT: port });
       assert.equal(await run.exit, 2, port);
       assert.match(run.stderr(), /COEDIT_PORT must be a port number from 0 to 65535/);
     }
   });
 
-  test('refuses an empty COEDIT_HOST, which Node would read as every interface', async () => {
-    const run = start({ COEDIT_HOST: '', COEDIT_PORT: '0' });
+  test('refuses an empty COEDIT_HOST, which Node would read as every interface', async (t) => {
+    const run = start(t, { COEDIT_HOST: '', COEDIT_PORT: '0' });
     assert.equal(await run.exit, 2);
     assert.match(run.stderr(), /COEDIT_HOST must not be empty/);
   });
 
-  test("says why when it can't listen, with exit 1 and no stack trace", async () => {
+  test("says why when it can't listen, with exit 1 and no stack trace", async (t) => {
     const blocker = createServer();
     await new Promise<void>((resolve) => blocker.listen(0, '127.0.0.1', resolve));
     const address = blocker.address();
     assert.ok(address !== null && typeof address === 'object');
     try {
-      const run = start({ COEDIT_PORT: String(address.port) });
+      const run = start(t, { COEDIT_PORT: String(address.port) });
       assert.equal(await run.exit, 1);
       assert.match(
         run.stderr(),
