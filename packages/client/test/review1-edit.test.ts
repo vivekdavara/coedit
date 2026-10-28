@@ -25,6 +25,10 @@ describe('review 1: diffText', () => {
     for (const caret of [Number.NaN, 1.5, Infinity, -Infinity]) {
       assert.deepEqual(diffText('ab', 'abc', caret), diffText('ab', 'abc'), `caret ${caret}`);
     }
+    // One where rounding would give a different answer (review 2: rounding passed the cases above). With no caret,
+    // the insert into "aa" goes last; a caret rounded to 1 would put it first.
+    assert.deepEqual(diffText('aa', 'aaa', 1.4), { index: 2, deleteCount: 0, text: 'a' });
+    assert.deepEqual(diffText('aa', 'aaa', 1), { index: 0, deleteCount: 0, text: 'a' });
   });
 });
 

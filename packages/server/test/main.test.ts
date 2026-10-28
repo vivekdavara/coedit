@@ -111,6 +111,32 @@ describe('main', () => {
     assert.match(run.stderr(), /COEDIT_HOST must not be empty/);
   });
 
+  test("brackets an IPv6 host in the can't-listen message too", async (t) => {
+    // Review 2: the message used the raw host, "::1:port", and the bind-error test above was IPv4 only.
+    const blocker = createServer();
+    const ok = await new Promise<boolean>((resolve) => {
+      blocker.once('error', () => {
+        resolve(false);
+      });
+      blocker.listen(0, '::1', () => {
+        resolve(true);
+      });
+    });
+    if (!ok) {
+      t.skip('no IPv6 loopback here');
+      return;
+    }
+    const address = blocker.address();
+    assert.ok(address !== null && typeof address === 'object');
+    try {
+      const run = start(t, { COEDIT_HOST: '::1', COEDIT_PORT: String(address.port) });
+      assert.equal(await run.exit, 1);
+      assert.match(run.stderr(), new RegExp(`^can't listen on \\[::1\\]:${address.port}: `));
+    } finally {
+      await new Promise((resolve) => blocker.close(resolve));
+    }
+  });
+
   test("says why when it can't listen, with exit 1 and no stack trace", async (t) => {
     const blocker = createServer();
     await new Promise<void>((resolve) => blocker.listen(0, '127.0.0.1', resolve));
