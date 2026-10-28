@@ -4,7 +4,8 @@
  *
  * - duplicate keys (it keeps the last; another reader may keep the first),
  * - lone surrogates (`"\ud800"`), which aren't text and can't be stored or sent as UTF-8,
- * - numbers it rounds: `9007199254740993` reads as `...992`, `1e400` as Infinity, `-0` as -0.
+ * - numbers it can't hold exactly: `9007199254740993` reads as `...992` and `1e400` as Infinity; and `-0` as
+ *   negative zero, which equals 0 but isn't the same value.
  *
  * This reader refuses all of those, and also anything the protocol never uses: fractions and exponents (every
  * number in the protocol is an integer), a byte order mark, and nesting deeper than {@link MAX_DEPTH}. Where it

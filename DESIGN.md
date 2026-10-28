@@ -163,7 +163,7 @@ Delete  = { "type": "delete", "spans": [ { "replica": string, "counter": integer
 - Unknown and missing keys are refused; key order and whitespace don't matter to the decoder, and the encoder always
   writes one canonical text (keys in the order above, no whitespace).
 - The decoder reads JSON with its own strict reader (`packages/crdt/src/json.ts`), not `JSON.parse`, which keeps the
-  last of duplicate keys, returns lone surrogates, and rounds what it can't hold (`9007199254740993`, `1e400`, `-0`).
+  last of duplicate keys, returns lone surrogates, rounds what it can't hold (`9007199254740993`, `1e400`) and keeps `-0`.
   The reader refuses all of those, plus fractions and exponents (every number here is an integer), a byte order mark
   and nesting deeper than 32. Where it accepts a text it gives the same value as `JSON.parse`.
 - The encoder runs the same checks before writing, so a replica can't send what the others would refuse.
