@@ -124,12 +124,18 @@ describe('the local model check', () => {
 
 describe('failures', () => {
   test('shrink to a short schedule with a readable trace', () => {
-    const error = fails(byIndex, {});
-    const steps = error.message.split('\nsteps:\n')[1]?.split('\n') ?? [];
-    // Two concurrent edits and the deliveries that expose them.
-    assert.ok(steps.length <= 8, error.message);
-    assert.match(error.message, /^text by index: replicas diverged\nreplicas now:\n {2}r0: /);
-    assert.match(error.message, /r\d edits: at \d+ delete \d+ insert /);
+    // Fixed seeds, so the bound can't fail by chance (an unseeded version failed about 1.5% of runs: review 1).
+    // Over seeds 1 to 400 the shrunk trace is 6 to 9 lines: two concurrent edits and the deliveries that expose
+    // them.
+    for (const seed of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 60]) {
+      const details = fc.check(convergence(byIndex, {}), { numRuns: 2_000, seed });
+      assert.ok(details.failed, `seed ${seed}`);
+      const message = (details.errorInstance as Error).message;
+      const steps = message.split('\nsteps:\n')[1]?.split('\n') ?? [];
+      assert.ok(steps.length <= 9, `seed ${seed}: ${message}`);
+      assert.match(message, /^text by index: replicas diverged\nreplicas now:\n {2}r0: /);
+      assert.match(message, /r\d edits: at \d+ delete \d+ insert /);
+    }
   });
 
   test('run replays a schedule deterministically', () => {

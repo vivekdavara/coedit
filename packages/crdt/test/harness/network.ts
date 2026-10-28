@@ -112,7 +112,9 @@ export function schedules(options: NetworkOptions = {}): fc.Arbitrary<Schedule> 
       replicas: fc.integer({ min, max }),
       // fast-check's default size keeps arrays to about 10 items whatever maxLength says; 'medium' uses more of it.
       steps: fc.array(fc.oneof(...kinds), { maxLength: options.maxSteps ?? 30, size: 'medium' }),
-      flush: fc.array(fc.nat(), { maxLength: 200 }),
+      // One pick per delivery left at the end (default schedules leave about 27, up to about 150); past the
+      // picks, the oldest goes first. 'max' because fast-check's default size stopped the picks at 10 (review 1).
+      flush: fc.array(fc.nat(), { maxLength: 300, size: 'max' }),
     },
     { noNullPrototype: true },
   );

@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import fc from 'fast-check';
-import { convergence, type Replica, type Subject } from './harness/network.ts';
+import { convergence, schedules, type Replica, type Subject } from './harness/network.ts';
 import { byIndex } from './harness/toys.ts';
 
 // ---- A broken CRDT that passes only because every replica is handed the same op object ----
@@ -116,6 +116,18 @@ describe('review 1: copies per delivery', () => {
     };
     const details = fc.check(convergence(echoOnly, { echo: true }), { numRuns: 2_000, seed: 1 });
     assert.ok(details.failed, `passed ${details.numRuns} schedules`);
+  });
+});
+
+describe('review 1: the final flush', () => {
+  test('can choose the order of every in-flight delivery', () => {
+    // DESIGN.md: "every message is delivered everywhere in a random order". fast-check's default size capped the
+    // flush at 10 picks, past which the oldest went first, while a default schedule leaves about 27 deliveries
+    // in flight on average and up to about 150.
+    const longest = Math.max(
+      ...fc.sample(schedules(), { numRuns: 5_000, seed: 1 }).map((s) => s.flush.length),
+    );
+    assert.ok(longest >= 150, `the longest flush has ${longest} picks`);
   });
 });
 
