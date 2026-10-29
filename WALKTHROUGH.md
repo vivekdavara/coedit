@@ -236,3 +236,15 @@ clock.
 with a smaller stack (`--stack-size=100`), where the old code overflowed at 20,000 runs and not at 5,000; 20,000 runs
 place in about 30 ms. And make the mistake hard to repeat: an ESLint rule forbids spreading into `push` or `unshift`
 in the CRDT's sources. The one spread left, into `splice`, is bounded by a run's 10,000 elements.
+
+**What did the second review find?** That round 1's fixes held, and something older: a V8 `Map` holds at most 2^24
+entries, so two maximal deletes of ids not yet present overflowed the deleted-ahead map partway through the second,
+which then threw with half its ids recorded. JavaScript gives no way to make `Map.set` infallible, so the replica checks
+first: it has a capacity (2^24 - 1 of each kind of entry) and refuses, before changing anything, an operation that
+would pass it. Refusal by capacity is the one way two replicas can disagree about accepting a valid operation, like any
+resource limit; the day-3 server refuses such operations before any client sees them.
+
+**What did you learn from the reviews about your measurement scripts?** That a smoke test checking a script's output
+format proves little if the script prints what it was asked to do instead of what it did. Both day-2 scripts passed
+with a mutant that measured nothing. Now they print fast-check's own run count and the replica's own count of what it
+holds, so a script that stops measuring prints a number the smoke test refuses.

@@ -225,6 +225,22 @@ schedules, a chain of two or more waiting runs in 9.7%, a delete naming an id an
 makes: conflicts, forged ids, a fan-out large enough for finding 2, or dependencies that never arrive (which
 `rga-pending.test.ts` covers by withholding operations).
 
+**Round 2** (on `0cbad60..55dec77`, round 1's fixes and everything else since; 14 minutes) found the fixes themselves
+sound and reproduced one older defect that contradicted a promise DESIGN.md had just made:
+
+1. **A V8 Map holds at most 2^24 entries**, and two valid deletes of 10 million absent ids each overflowed the
+   deleted-ahead map partway through the second, leaving it half applied and uncounted. A replica now has a capacity
+   (2^24 - 1 elements, ids deleted ahead and waiting deletes, each) and refuses an operation past it before changing
+   anything (`80b615f`); the review's own case at full size passes.
+
+The rest was about measuring and testing: both scripts passed their smoke tests with six one-line mutants (a deep run
+of 1 schedule still printed "20,000 pass"; worst-delete computed its id count from its arguments), so they now print
+fast-check's count and the replica's own (`Rga.sizes()`), and five of the six fail (`4ec96f2`); the lint rule missed
+eight ways to pass a list as arguments, all flagged now (`19fd1f7`); a key of a waiting delete by its ids rather than
+its spans survived (pinned, `a2ea2e7`); and five docs claims were wrong (a 60 KB message that is 49 KB, the clock
+"largest counter seen", and others; `c7c6237`). Its census of 4,000 editing sessions: a delete waits in 52.5%, a
+waiting delete is resent in 33.0%, concurrent identical deletes in 13.3%, a delete naming an id twice in none.
+
 ## Review of day 1
 
 Two review agents, one after the other, each in its own worktree with a correctness brief, writing each finding as a
