@@ -41,16 +41,23 @@ export default tseslint.config(
     },
   },
   {
-    // A spread passes every element as an argument: about 110,000 overflow the stack. The CRDT holds lists of any
-    // length (runs waiting on one element, review 1 of day 2), so it may not spread into push or unshift.
+    // A list passed as arguments goes on the stack: about 110,000 overflow it. The CRDT holds lists of any length
+    // (runs waiting on one element, review 1 of day 2), so its sources may not spread into a call or pass a list
+    // through apply (review 2 listed the ways round the first rule: a['push'](...b), push.apply, Reflect.apply,
+    // Math.max(...b)). A spread whose length is bounded says so in an eslint-disable comment.
     files: ['packages/crdt/src/**/*.ts'],
     rules: {
       'no-restricted-syntax': [
         'error',
         {
-          selector: 'CallExpression[callee.property.name=/^(push|unshift)$/] > SpreadElement',
+          selector: 'CallExpression > SpreadElement, NewExpression > SpreadElement',
           message:
-            'Spreading a list of unbounded length can overflow the stack; push one at a time.',
+            'A list of unbounded length spread into a call can overflow the stack; loop instead.',
+        },
+        {
+          selector:
+            "CallExpression[callee.property.name='apply'][callee.object.type='MemberExpression'], CallExpression[callee.object.name='Reflect'][callee.property.name='apply']",
+          message: 'apply passes a list as arguments, which can overflow the stack; loop instead.',
         },
       ],
     },

@@ -326,7 +326,7 @@ export class Rga {
       if (compareIds(e.id, first) < 0) break;
       if (!e.deleted) visible++;
     }
-    // A spread is safe here: a run has at most MAX_INSERT_LENGTH (10,000) elements.
+    // eslint-disable-next-line no-restricted-syntax -- bounded: a run has at most MAX_INSERT_LENGTH (10,000) elements
     elements.splice(i, 0, ...run.elements);
     run.placed = true;
     // Elements deleted ahead of their insert are placed as tombstones, so only the rest show.
