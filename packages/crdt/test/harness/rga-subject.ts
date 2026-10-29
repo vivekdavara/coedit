@@ -2,10 +2,20 @@
  * RGA as a subject for the network simulator (DESIGN.md "Testing convergence", day 2): each replica checks, on
  * every delivery, that the visible changes `apply` returned turn the text before into the text after.
  */
+import assert from 'node:assert/strict';
+import fc from 'fast-check';
 import { decodeClientMessage, encodeClientMessage, type Op } from '../../src/protocol.ts';
 import { Rga, type RgaOptions } from '../../src/rga.ts';
 import { replay } from './changes.ts';
-import type { Replica, Subject } from './network.ts';
+import {
+  REPLICA_NAMES,
+  run,
+  schedules,
+  type NetworkOptions,
+  type Replica,
+  type Schedule,
+  type Subject,
+} from './network.ts';
 
 /** What one replica's deliveries did, for the coverage test. */
 export interface Counts {
@@ -81,3 +91,75 @@ export function rgaSubject(options: RgaSubjectOptions = {}): Subject<Op, RgaRepl
     edit: (replica, index, deleteCount, text) => replica.rga.edit(index, deleteCount, text),
   };
 }
+
+/** Every freedom on, the state check compulsory, the real codec, and the local-edit model. */
+export const FULL: NetworkOptions = { requireState: true, transport: wire, localModel: true };
+
+/** The convergence property, plus: after the final flush no replica holds a waiting operation. */
+export function rgaConvergence(
+  subject: RgaSubjectOptions,
+  network: NetworkOptions,
+): fc.IPropertyWithHooks<[Schedule]> {
+  return fc.property(schedules(network), (schedule) => {
+    const replicas: RgaReplica[] = [];
+    run(rgaSubject({ ...subject, created: (r) => replicas.push(r) }), schedule, network);
+    for (const r of replicas) assert.equal(r.rga.pending, 0, `${r.rga.replica} still waits`);
+  });
+}
+
+export interface ConvergenceCase {
+  readonly name: string;
+  readonly subject: RgaSubjectOptions;
+  readonly network: NetworkOptions;
+  /** Schedules the test suite runs; `npm run deep-convergence -w @coedit/crdt` runs more. */
+  readonly runs: number;
+}
+
+const MAX = Number.MAX_SAFE_INTEGER;
+// m 0, Z near 2^31, b near 2^53, B 5, mm 2^32, a_ just below b.
+const FAR_APART = new Map(
+  REPLICA_NAMES.map((name, i) => [
+    name as string,
+    [0, 2 ** 31 - 3, MAX - 10_000, 5, 2 ** 32, MAX - 10_001][i] ?? 0,
+  ]),
+);
+
+/** The convergence tests (rga-convergence.test.ts) and the deep run share these. */
+export const CONVERGENCE_CASES: readonly ConvergenceCase[] = [
+  {
+    name: 'with 2 to 5 replicas and every freedom on',
+    subject: {},
+    network: { ...FULL, replicas: [2, 5] },
+    runs: 1_000,
+  },
+  {
+    name: 'over long schedules with up to 6 replicas',
+    subject: {},
+    network: { ...FULL, replicas: [2, 6], maxSteps: 80 },
+    runs: 200,
+  },
+  {
+    name: 'with delivery in causal order and no duplicates (the server topology)',
+    subject: {},
+    network: { ...FULL, reorder: false, duplicates: false },
+    runs: 300,
+  },
+  {
+    name: 'with clocks starting near 2^31',
+    subject: { clock: () => 2 ** 31 - 20 },
+    network: { ...FULL, replicas: [2, 4] },
+    runs: 300,
+  },
+  {
+    name: 'with clocks starting near 2^53 - 1 - 10,000',
+    subject: { clock: () => MAX - 10_000 },
+    network: { ...FULL, replicas: [2, 4] },
+    runs: 300,
+  },
+  {
+    name: 'with clocks starting far apart',
+    subject: { clock: (name) => FAR_APART.get(name) ?? 0 },
+    network: { ...FULL, replicas: [2, 6] },
+    runs: 300,
+  },
+];
