@@ -289,7 +289,8 @@ support this machine's Node 23).
   measured with `npm run worst-delete -w @coedit/crdt` (add `-- 100` for 100 spans). In
   Coedit's topology clients only receive what the server accepted, and the server (day 3) must refuse operations whose
   dependencies it lacks, checking spans against runs rather than id by id. Storing absent ids as spans would fix it in
-  the CRDT itself.
+  the CRDT itself. A second such delete would pass the replica's capacity (2^24 - 1 ids deleted ahead, the most a V8
+  Map holds) and is refused before anything changes; before review 2 it overflowed a Map halfway.
 - Which of two conflicting inserts a replica keeps depends on which arrived first; that the pair conflicts doesn't. The
   server settles it by refusing the second (day 3).
 - A peer can exhaust a replica's clock with an insert at counter 2^53 - 1 (a delete naming another replica's ids no

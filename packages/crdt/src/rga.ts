@@ -32,9 +32,18 @@ export type Change =
   | { readonly type: 'insert'; readonly index: number; readonly text: string }
   | { readonly type: 'delete'; readonly index: number; readonly count: number };
 
+/** The most entries a V8 Map holds: past it, `set` throws (review 2 of day 2). */
+export const MAX_CAPACITY = 2 ** 24 - 1;
+
 export interface RgaOptions {
   /** Where the Lamport clock starts (default 0). Tests start it near 2^31 and 2^53 to try large counters. */
   readonly clock?: number;
+  /**
+   * The most elements, the most ids deleted ahead, and the most waiting deletes this replica holds, each counted
+   * on its own (default and maximum MAX_CAPACITY, 2^24 - 1). An operation that would hold more is refused with
+   * RangeError before anything changes, instead of a Map refusing it halfway. Tests set it small.
+   */
+  readonly capacity?: number;
 }
 
 /**
@@ -93,6 +102,7 @@ export class Rga {
   readonly #waitingDeletes = new Map<string, DeleteWait>();
   /** Visible elements. */
   #length = 0;
+  readonly #capacity: number;
 
   constructor(replica: string, options: RgaOptions = {}) {
     if (!isReplicaName(replica)) {
@@ -104,8 +114,13 @@ export class Rga {
     if (!Number.isSafeInteger(clock) || clock < 0) {
       throw new RangeError(`clock ${clock} isn't an integer from 0 to 2^53 - 1`);
     }
+    const capacity = options.capacity ?? MAX_CAPACITY;
+    if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > MAX_CAPACITY) {
+      throw new RangeError(`capacity ${capacity} isn't an integer from 1 to 2^24 - 1`);
+    }
     this.replica = replica;
     this.#clock = clock;
+    this.#capacity = capacity;
   }
 
   /** The visible text. */
@@ -152,6 +167,8 @@ export class Rga {
     if (chars.length > Number.MAX_SAFE_INTEGER - this.#clock) {
       throw new RangeError(`the clock is at ${this.#clock}: no counters left for ${chars.length}`);
     }
+    // Checked here too, not only in #insert: the edit's deletes are applied before its inserts.
+    this.#makeRoom(chars.length);
 
     // The origin is the visible element before `index`; the targets are the `deleteCount` from it.
     let origin: Element | null = null;
@@ -188,8 +205,8 @@ export class Rga {
   /**
    * Applies an operation from anyone, this replica's own echoes included. Returns the visible changes in order:
    * none for a duplicate or an operation still waiting; when an operation completes the dependencies of waiting
-   * ones, theirs too. Throws ProtocolError for an operation that isn't valid and ConflictError for one that
-   * reuses a known id with other content, and changes nothing then.
+   * ones, theirs too. Throws ProtocolError for an operation that isn't valid, ConflictError for one that reuses a
+   * known id with other content, and RangeError for one that would pass the capacity; it changes nothing then.
    */
   apply(op: Op): Change[] {
     return this.#apply(validateOp(op));
@@ -222,6 +239,7 @@ export class Rga {
       const e = this.#known.get(id);
       if (e !== undefined) throw new ConflictError(id, `already known, in ${describeRun(e.run)}`);
     }
+    this.#makeRoom(chars.length);
     this.#clock = Math.max(this.#clock, op.id.counter + chars.length - 1);
     const run: Run = { op, elements: [], placed: false };
     for (let i = 0; i < chars.length; i++) {
@@ -309,6 +327,7 @@ export class Rga {
     // pile up. (validateOp wrote the spans with their keys in canonical order.)
     const key = JSON.stringify(op.spans);
     if (this.#waitingDeletes.has(key)) return [];
+    this.#checkDeleteRoom(op);
     const targets = new Set<Element>();
     let wait: DeleteWait | null = null;
     for (const span of op.spans) {
@@ -367,6 +386,52 @@ export class Rga {
     for (const e of targets) e.deleted = true;
     this.#length -= targets.size;
     return changes;
+  }
+
+  /** Refuses, before any change, an insert of `count` elements that would hold more than the capacity. */
+  #makeRoom(count: number): void {
+    if (this.#known.size + count > this.#capacity) {
+      throw new RangeError(
+        `${count} more elements would pass this replica's capacity of ${this.#capacity} (it holds ${this.#known.size})`,
+      );
+    }
+  }
+
+  /**
+   * Refuses, before any change, a delete that would record more ids deleted ahead, or more waiting deletes, than
+   * the capacity. Counting needs a pass over every id, so it's skipped when the delete couldn't reach the capacity
+   * even if none of its ids were here. An id named twice by one delete counts twice: refusing a little early is
+   * safe.
+   */
+  #checkDeleteRoom(op: DeleteOp): void {
+    let named = 0;
+    for (const span of op.spans) named += span.length;
+    if (
+      this.#deletedAhead.size + named <= this.#capacity &&
+      this.#waitingDeletes.size < this.#capacity
+    ) {
+      return;
+    }
+    let absent = 0;
+    let added = 0;
+    for (const span of op.spans) {
+      for (let i = 0; i < span.length; i++) {
+        const id = { replica: span.replica, counter: span.counter + i };
+        if (this.#known.has(id)) continue;
+        absent++;
+        if (!this.#deletedAhead.has(id)) added++;
+      }
+    }
+    if (this.#deletedAhead.size + added > this.#capacity) {
+      throw new RangeError(
+        `${added} more ids deleted ahead would pass this replica's capacity of ${this.#capacity}`,
+      );
+    }
+    if (absent > 0 && this.#waitingDeletes.size >= this.#capacity) {
+      throw new RangeError(
+        `another waiting delete would pass this replica's capacity of ${this.#capacity}`,
+      );
+    }
   }
 
   /**
