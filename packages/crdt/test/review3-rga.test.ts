@@ -52,3 +52,8 @@ test('sizes() counts waiting runs, not the origins they wait on', () => {
   assert.equal(rga.sizes().waitingRuns, 2);
   assert.equal(rga.pending, 2);
 });
+
+// Review 4: the capacity getter was checked only at its default, so returning MAX_CAPACITY always passed.
+test('the capacity getter reports the capacity the replica was given', () => {
+  assert.equal(new Rga('r', { capacity: 5 }).capacity, 5);
+});

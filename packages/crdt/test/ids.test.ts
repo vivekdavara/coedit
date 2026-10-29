@@ -145,3 +145,30 @@ describe('IdMap', () => {
     );
   });
 });
+
+describe('IdMap when a set throws', () => {
+  // Review 4: IdMap counted a new entry before the Map's set, so a set that threw (a Map past its size limit)
+  // left the count one too high for good; nothing tested the order. Here the next set throws on purpose.
+  test('counts an entry only once its set has succeeded', () => {
+    const map = new IdMap<number>();
+    map.set({ counter: 1, replica: 'a' }, 1);
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- kept to restore it, and called with call()
+    const set = Map.prototype.set;
+    let calls = 0;
+    Map.prototype.set = function (this: Map<unknown, unknown>, key: unknown, value: unknown) {
+      if (calls++ === 0) throw new RangeError('Map maximum size exceeded');
+      return set.call(this, key, value);
+    };
+    try {
+      assert.throws(() => {
+        map.set({ counter: 2, replica: 'a' }, 2);
+      }, RangeError);
+    } finally {
+      Map.prototype.set = set;
+    }
+    assert.equal(map.size, 1);
+    assert.equal(map.has({ counter: 2, replica: 'a' }), false);
+    map.set({ counter: 2, replica: 'a' }, 2);
+    assert.equal(map.size, 2);
+  });
+});
