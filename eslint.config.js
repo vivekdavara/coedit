@@ -41,6 +41,21 @@ export default tseslint.config(
     },
   },
   {
+    // A spread passes every element as an argument: about 110,000 overflow the stack. The CRDT holds lists of any
+    // length (runs waiting on one element, review 1 of day 2), so it may not spread into push or unshift.
+    files: ['packages/crdt/src/**/*.ts'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: 'CallExpression[callee.property.name=/^(push|unshift)$/] > SpreadElement',
+          message:
+            'Spreading a list of unbounded length can overflow the stack; push one at a time.',
+        },
+      ],
+    },
+  },
+  {
     files: ['packages/client/src/**/*.{ts,tsx}'],
     plugins: { 'react-hooks': reactHooks },
     rules: reactHooks.configs.recommended.rules,

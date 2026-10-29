@@ -257,7 +257,10 @@ export class Rga {
         if (waiting === undefined) continue;
         this.#waiting.delete(e.id);
         this.#waitingRuns -= waiting.length;
-        queue.push(...waiting);
+        // One at a time, not push(...waiting): any number of runs can wait on one element, and spreading a list
+        // of about 110,000 overflowed the stack after this insert was placed and the runs were taken out of
+        // #waiting, losing them (review 1).
+        for (const w of waiting) queue.push(w);
       }
     }
     return changes;
@@ -282,6 +285,7 @@ export class Rga {
       if (compareIds(e.id, first) < 0) break;
       if (!e.deleted) visible++;
     }
+    // A spread is safe here: a run has at most MAX_INSERT_LENGTH (10,000) elements.
     elements.splice(i, 0, ...run.elements);
     run.placed = true;
     // Elements deleted ahead of their insert are placed as tombstones, so only the rest show.
@@ -399,7 +403,8 @@ export class Rga {
    */
   state(): string {
     const waiting: Run[] = [];
-    for (const id of this.#waiting.ids()) waiting.push(...(this.#waiting.get(id) as Run[]));
+    for (const id of this.#waiting.ids())
+      for (const run of this.#waiting.get(id) as Run[]) waiting.push(run);
     waiting.sort((a, b) => compareIds(a.op.id, b.op.id));
     const runs = waiting.map((run) => run.elements.map(describe).join(' '));
     return [
