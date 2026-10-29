@@ -342,6 +342,40 @@ export class Rga {
   }
 
   /**
+   * For presence: the id of the visible element just before `index`, or null at 0 (the start). A cursor kept as
+   * "just after this id" stays next to the same text while others edit before it.
+   */
+  idBefore(index: number): Id | null {
+    if (!Number.isSafeInteger(index) || index < 0 || index > this.#length) {
+      throw new RangeError(`index ${index} is outside 0 to ${this.#length}`);
+    }
+    if (index === 0) return null;
+    let visible = 0;
+    for (const e of this.#elements) {
+      if (!e.deleted && ++visible === index)
+        return { replica: e.id.replica, counter: e.id.counter };
+    }
+    throw new Error(`only ${visible} visible elements, but the length is ${this.#length}`);
+  }
+
+  /**
+   * Where the position just after element `id` is now: the number of visible elements up to and including it. For
+   * a tombstone that's the visible elements before it, so a cursor after deleted text moves to where it was.
+   * Null (the start) is 0. Undefined for an element that isn't placed here: unknown, or waiting for its origin.
+   */
+  indexAfter(id: Id | null): number | undefined {
+    if (id === null) return 0;
+    const target = this.#known.get(id);
+    if (target?.run.placed !== true) return undefined;
+    let visible = 0;
+    for (const e of this.#elements) {
+      if (!e.deleted) visible++;
+      if (e === target) return visible;
+    }
+    throw new Error(`${formatId(id)} is placed but not in the sequence`);
+  }
+
+  /**
    * The whole state, written canonically: every placed element in order (`counter@replica`, then `<origin` on
    * the first of a run, `~` for a tombstone, then the character), the runs waiting for their origin, and the ids
    * deleted ahead of their insert. Two replicas with the same state hold the same document and will place any
