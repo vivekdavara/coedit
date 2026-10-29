@@ -143,3 +143,72 @@ re-measured after each.
 **What does the isolation check cost?** It snapshots every replica's text and state after every step, which made the
 self-test 13 times slower at first (5.4 s against 0.4 s). Reusing each step's snapshot as the next one's "before"
 halved it; the whole suite is under 4 s.
+
+## The CRDT (day 2)
+
+**Walk me through `apply` for an insert.** `packages/crdt/src/rga.ts`, `#insert`. The operation is first checked and
+copied by `validateOp` (so nothing outside holds what the replica stores). Then: is its first id known? If it is the
+same run (first id, origin, text) it's a duplicate and returns no changes; anything else touching a known id throws
+`ConflictError`. Otherwise the clock moves up to the run's last counter, one element per code point is created and
+indexed, and any of them deleted ahead of time are marked. If the origin isn't placed yet the run waits under its
+origin's id. If it is, `#place` scans from the origin past every larger id, splices the run in, and returns the
+visible change; then every run waiting on one of its elements is placed the same way, and so on (a queue, not
+recursion).
+
+**And for a delete?** `#delete`: each id in each span is looked up. A placed, visible element becomes a target; one
+still waiting for its origin is just marked deleted (it will be placed as a tombstone); an unknown id is remembered as
+deleted ahead. Then one pass over the sequence turns the targets into changes: their visible indices, grouped into
+stretches of consecutive ones, each shifted left by the stretches before it so the changes apply one after another.
+
+**How do you tell a duplicate from a conflict?** A run is made whole by one replica, which never reuses a counter, so
+an honest resend is exactly the same run. So the check is on runs: same first id, origin and text is a duplicate;
+anything else that touches a known id (another character, another origin, a longer or shorter run, a run starting
+inside a known one) is a conflict. Checking element by element would be order-dependent: a run consisting of the tail
+of a known run would pass as a duplicate if it came second and conflict if it came first. `rga-conflicts.test.ts` has
+a property applying two overlapping inserts in both orders.
+
+**What does `pending` count, and why did you change it?** Operations still waiting: runs whose origin isn't placed,
+and distinct deletes that name an id no insert here has carried. In the first version only the first delete naming a
+missing id waited for it, so two deletes naming the same missing id counted as one or two depending on arrival order.
+Now each delete waits for all of its own missing ids, so `pending`, like `state()`, depends only on which operations
+arrived. `rga-pending.test.ts` checks both against a model; its first counterexample was a flaw in my model, not the
+code: two replicas deleting the same text at once make byte-identical deletes, which a replica can't tell apart.
+
+**Why is the Lamport clock bumped by deletes and waiting inserts too?** So a replica's next id is never one it already
+knows of. If a buggy peer used my replica id at counter 50 in an insert still waiting, or deleted `50@me` ahead of
+time, and my clock were 10, my next edit would make `11@me`... and eventually `50@me`, which would conflict or arrive
+pre-deleted. Covering every counter seen rules it out.
+
+**Why one array and linear scans?** It's the simplest structure whose correctness is easy to see, and the tests are
+about correctness. Every operation is O(n): finding the origin, counting visible elements, splicing. Day 4 measures
+it; if it's too slow at realistic sizes, an order-statistics tree replaces the array behind the same interface.
+
+**What are `idBefore` and `indexAfter` for?** Presence. A cursor is sent as "just after element X" (an id), not an
+index, because an index goes stale as soon as someone types before it. `indexAfter(X)` counts visible elements up to
+and including X; if X has been deleted, that's where it was. It returns `undefined` for an element not placed here
+rather than guess.
+
+**What happens near 2^53?** Counters are safe integers; comparisons, never subtraction, decide the order. A replica
+whose clock reaches 2^53 - 1 refuses edits that need ids (a replace too, whole), while deletes still work.
+`rga-limits.test.ts` starts clocks at 2^53 - 4; the convergence properties also run with clocks near 2^31 (where
+32-bit storage would wrap) and near 2^53 - 1 - 10,000.
+
+## Testing the CRDT (day 2)
+
+**How is the CRDT tested?** Through yesterday's simulator (`packages/crdt/test/harness/rga-subject.ts` adapts it):
+every operation goes through the real codec, the state check is compulsory, local edits must land exactly where they
+were made, every delivery's changes must replay on the text, and nothing may still wait at the end. Plus targeted
+properties: concurrent typists at one spot keep their runs whole (`rga-intention.test.ts`), state is a function of the
+set of operations received (`rga-pending.test.ts`), a cursor follows its text (`rga-presence.test.ts`), and whether
+two inserts conflict doesn't depend on their order (`rga-conflicts.test.ts`).
+
+**How do you know those tests can fail?** Every mechanism was removed in turn and the tests run against the mutant:
+removing or reversing the skip rule, dropping the cascade of waiting runs, either pre-delete path, the clock update,
+the change index shift, the run-level duplicate check's four conditions, the limits' splits. Each fails at least one
+test. Two guards failed none, and that taught me something: a doubled wait record is matched by a doubled release, so
+they only kept memory from growing; one is gone and the other is documented as exactly that. A coverage test also
+pins what the schedules exercise (an operation waited in 61% of seeded schedules), so a weakened generator fails.
+
+**Why compute the expected order in the intention test by code units?** Because then the test also pins the id
+order: with `localeCompare` the typists' runs come out in another order and the test fails, which the convergence
+tests alone can't see (every replica in one process shares a locale).

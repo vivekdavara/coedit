@@ -7,10 +7,12 @@ Several people edit one document at once, each in their own tab; edits merge wit
 every replica applies the same commuting operations. Built to be explained end to end: one ordering rule with a short
 proof, a strict wire format, and a test harness that is itself tested.
 
-**Status: day 1 of 5.** Done: the design for all five days (DESIGN.md), the workspaces and CI, the wire format with a
-strict decoder, the network simulator for convergence tests and its self-test, and the client's mapping from
-textarea input to edits. Next: the CRDT itself (day 2), then sync and presence (day 3), persistence and tombstone
-collection (day 4), release (day 5).
+**Status: day 2 of 5.** Done: the design for all five days (DESIGN.md), the workspaces and CI, the wire format with a
+strict decoder, the network simulator for convergence tests and its self-test, the client's mapping from textarea
+input to edits (day 1), and the CRDT itself: RGA with Lamport ids, runs placed by the skip rule, tombstones,
+operations in any order (waiting ones held and released), conflicts refused, positions as ids for presence, all
+property-tested for convergence through the simulator and the real codec (day 2). Next: sync and presence over
+WebSockets (day 3), persistence and tombstone collection (day 4), release (day 5).
 
 ## Architecture
 
@@ -30,17 +32,19 @@ flowchart LR
 
 The server orders operations into a numbered log and relays each to every client, the sender included (the echo is
 the acknowledgement). It applies every operation to its own replica first, so it refuses what would split replicas
-apart. Built so far: the wire format, the edit mapping, the server's health endpoint; the rest is specified in
-DESIGN.md.
+apart. Built so far: the wire format, the CRDT, the edit mapping, the server's health endpoint; the rest is specified
+in DESIGN.md.
 
 ## Layout
 
 | Path                            | What                                                                      |
 | ------------------------------- | ------------------------------------------------------------------------- |
 | `DESIGN.md`                     | the specification: RGA and why it converges, wire format, sync protocol   |
+| `packages/crdt/src/rga.ts`      | the CRDT: insert, delete, waiting operations, conflicts, presence         |
+| `packages/crdt/src/ids.ts`      | the id order (counter, then replica by code unit) and a map keyed by ids  |
 | `packages/crdt/src/json.ts`     | a strict JSON reader (duplicate keys, lone surrogates, rounding: refused) |
 | `packages/crdt/src/protocol.ts` | operations and protocol messages; strict decoder, canonical encoder       |
-| `packages/crdt/test/harness/`   | the network simulator and the toy CRDTs that test it                      |
+| `packages/crdt/test/harness/`   | the network simulator, the toy CRDTs that test it, the RGA as a subject   |
 | `test/`                         | repo-wide checks: the docs against the code, the workspace exports        |
 | `packages/crdt/scripts/`        | `harness-stats` (what schedules exercise) and `bench-codec`               |
 | `packages/server/src/`          | the server: `/healthz` so far; `main.ts` is the command line              |
