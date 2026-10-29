@@ -135,7 +135,11 @@ export class Rga {
     return this.#length;
   }
 
-  /** The largest counter this replica has made or seen; its next insert takes the one after. */
+  /**
+   * The largest counter among this replica's own ids, the inserts it has received (waiting ones too), and the ids
+   * under its own id that deletes have named; its next insert takes the one after. A delete naming other replicas'
+   * ids doesn't move it.
+   */
   get clock(): number {
     return this.#clock;
   }

@@ -67,7 +67,8 @@ The document is a sequence of _elements_. Each element is one Unicode code point
   bytes, base64url); `counter` is a positive integer from the replica's Lamport clock. A replica never reuses a
   counter, and two replicas never share a replica id, so ids are unique. A tab that reloads without its state is a
   new replica with a new id.
-- **The Lamport clock.** Each replica keeps `clock`, the largest counter it has seen. A local insert takes
+- **The Lamport clock.** Each replica keeps `clock`, the largest counter among its own ids and the ids it has
+  received in inserts (and, below, some deletes). A local insert takes
   `clock + 1`; receiving an element with counter `c` sets `clock = max(clock, c)`. So an element inserted by someone
   who had already seen element `e` has a larger counter than `e`. The clock also covers inserts still waiting for
   their origin and the ids a delete names under this replica's own id, so its new ids never equal an id it holds,
@@ -154,7 +155,7 @@ class Rga {
   constructor(replica: string, options?: { clock?: number; capacity?: number });
   text(): string; // the visible text
   readonly length: number; // visible code points
-  readonly clock: number; // the largest counter made or seen
+  readonly clock: number; // the largest counter of its own and received inserts, and of its own ids deleted
   /**
    * A local edit, applied at once; returns the operations to send: deletes, then inserts. One insert carries at
    * most 10,000 code points and one delete 1,000 spans, so a larger edit becomes several (each insert after the

@@ -46,7 +46,7 @@ in DESIGN.md.
 | `packages/crdt/src/protocol.ts` | operations and protocol messages; strict decoder, canonical encoder       |
 | `packages/crdt/test/harness/`   | the network simulator, the toy CRDTs that test it, the RGA as a subject   |
 | `test/`                         | repo-wide checks: the docs against the code, the workspace exports        |
-| `packages/crdt/scripts/`        | `harness-stats` (what schedules exercise) and `bench-codec`               |
+| `packages/crdt/scripts/`        | `harness-stats`, `bench-codec`, `deep-convergence`, `worst-delete`        |
 | `packages/server/src/`          | the server: `/healthz` so far; `main.ts` is the command line              |
 | `packages/client/src/edit.ts`   | textarea before/after + caret to one edit, in code points                 |
 | `packages/client/src/App.tsx`   | the editor shell (local only until day 3)                                 |
@@ -81,18 +81,20 @@ the edit each input became.
 Measured on the same Apple M3 (macOS 26.6.2, Node 23.11.0, on AC, no sleep in `pmset -g log`). All inputs are
 synthetic.
 
-- **Convergence at depth**: every convergence case passes at 20,000 schedules. Run at `7b2e0d3` (15:24 to 15:26,
-  with a review agent running tests alongside) by a one-off script with the same cases that
-  `npm run deep-convergence -w @coedit/crdt` now runs:
+- **Convergence at depth**: every convergence case passes at 20,000 schedules, by
+  `npm run deep-convergence -w @coedit/crdt` at `a2ea2e7` (16:00 to 16:02, nothing else of mine running; macOS's
+  `mediaanalysisd` was using a core). Its counts are fast-check's own. An earlier run of the same cases at `7b2e0d3`,
+  by a one-off script with a review agent running alongside, gave the same within 0.3 s a case.
 
   | Case                                      | Seconds |
   | ----------------------------------------- | ------: |
-  | 2 to 5 replicas, every freedom on         |     7.3 |
-  | long schedules (80 steps), up to 6        |    48.7 |
-  | causal delivery, no duplicates            |     8.1 |
-  | clocks near 2^31                          |     6.4 |
-  | clocks near 2^53 - 1 - 10,000             |     6.5 |
-  | clocks far apart (0 to 2^53 - 1 - 10,000) |     9.7 |
+  | 2 to 5 replicas, every freedom on         |     7.4 |
+  | long schedules (80 steps), up to 6        |    49.0 |
+  | causal delivery, no duplicates            |     8.3 |
+  | clocks near 2^31                          |     6.6 |
+  | clocks near 2^53 - 1 - 10,000             |     6.6 |
+  | clocks far apart (0 to 2^53 - 1 - 10,000) |     9.9 |
+  | all six                                   |    87.8 |
 
 - **What the schedules exercise** (the coverage test in `packages/crdt/test/rga-convergence.test.ts`, 300 schedules,
   seed 1): an operation waited for a dependency in 61% of schedules (183), one delivery returned several changes
@@ -104,8 +106,9 @@ synthetic.
   the splits and the clock's limit off by one, the presence methods counting tombstones) fails at least one test,
   most of them 3 to 7. Two guards failed none and were found to be unobservable (see the WALKTHROUGH); one was
   removed.
-- **The worst delete** (`npm run worst-delete -w @coedit/crdt`): 10 million ids deleted ahead of their inserts, 3.3 s
-  and +982 MiB of heap; see "Limitations (day 2)".
+- **The worst delete** (`npm run worst-delete -w @coedit/crdt -- 1000 twice` at `a2ea2e7`): 10 million ids deleted
+  ahead of their inserts from one 48,936-byte message, 3.6 s and +982 MiB of heap; a second such delete refused for
+  the capacity in 1.1 s (the count of its ids), nothing changed. See "Limitations (day 2)".
 
 ## Results (day 1)
 
@@ -285,17 +288,17 @@ support this machine's Node 23).
 - Every operation scans one array: O(n) in the document's elements, tombstones included, and tombstones are never
   collected yet. Day 4 measures it and collects what it can prove unneeded.
 - **One valid delete can name 10 million ids** (1,000 spans of 10,000), and a replica holding none of them records
-  each as deleted ahead: 3.3 s and +982 MiB of heap for one 60 KB operation (0.15 s and +82 MiB for 100 spans),
-  measured with `npm run worst-delete -w @coedit/crdt` (add `-- 100` for 100 spans). In
+  each as deleted ahead: 3.6 s and +982 MiB of heap for one 48,936-byte message (0.16 s and +82 MiB for 100 spans,
+  4,836 bytes), measured with `npm run worst-delete -w @coedit/crdt` (add `-- 100` for 100 spans). In
   Coedit's topology clients only receive what the server accepted, and the server (day 3) must refuse operations whose
   dependencies it lacks, checking spans against runs rather than id by id. Storing absent ids as spans would fix it in
   the CRDT itself. A second such delete would pass the replica's capacity (2^24 - 1 ids deleted ahead, the most a V8
   Map holds) and is refused before anything changes; before review 2 it overflowed a Map halfway.
 - Which of two conflicting inserts a replica keeps depends on which arrived first; that the pair conflicts doesn't. The
   server settles it by refusing the second (day 3).
-- A peer can exhaust a replica's clock with an insert at counter 2^53 - 1 (a delete naming another replica's ids no
-  longer moves the clock, since review 1); edits that need ids are then refused. Only a buggy or tampered peer can,
-  and the server will have to refuse such counters.
+- A peer can exhaust a replica's clock with an insert at counter 2^53 - 1, or a delete naming this replica's own id
+  at 2^53 - 1 (a delete naming another replica's ids no longer moves the clock, since review 1); edits that need ids
+  are then refused. Only a buggy or tampered peer can, and the server will have to refuse such counters.
 - Text typed backwards at one spot interleaves with concurrent text typed the same way (RGA's known weakness, pinned
   by a test); grapheme clusters can be split by concurrent edits (code points can't).
 

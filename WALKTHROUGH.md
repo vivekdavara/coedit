@@ -171,8 +171,9 @@ a property applying two overlapping inserts in both orders.
 and distinct deletes that name an id no insert here has carried. In the first version only the first delete naming a
 missing id waited for it, so two deletes naming the same missing id counted as one or two depending on arrival order.
 Now each delete waits for all of its own missing ids, so `pending`, like `state()`, depends only on which operations
-arrived. `rga-pending.test.ts` checks both against a model; its first counterexample was a flaw in my model, not the
-code: two replicas deleting the same text at once make byte-identical deletes, which a replica can't tell apart.
+arrived. `rga-pending.test.ts` checks `pending` (and the visible length) against a model, and both `pending` and
+`state()` for order independence; the model's first counterexample was a flaw in my model, not the code: two
+replicas deleting the same text at once make byte-identical deletes, which a replica can't tell apart.
 
 **Why is the Lamport clock bumped by waiting inserts and some deletes too?** So a replica's next id is never one it
 already knows of. If a buggy peer used my replica id at counter 50 in an insert still waiting, or deleted `50@me` ahead
