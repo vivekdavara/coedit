@@ -344,6 +344,11 @@ function integer(
 
 const NAME = /^[A-Za-z0-9_-]+$/;
 
+/** Whether `value` is a valid replica id (1 to 32 characters of A-Z a-z 0-9 _ -). */
+export function isReplicaName(value: string): boolean {
+  return value.length >= 1 && value.length <= MAX_REPLICA_LENGTH && NAME.test(value);
+}
+
 function name(value: JsonValue | undefined, path: string, max: number): string {
   if (typeof value !== 'string') throw new ProtocolError(path, 'must be a string');
   if (value.length < 1 || value.length > max || !NAME.test(value)) {
