@@ -10,7 +10,7 @@
  * The elements live in one array in document order, and positions are found by scanning it: O(n) per operation,
  * simple to check. Day 4 measures whether that's fast enough.
  */
-import { IdMap, compareIds, formatId } from './ids.ts';
+import { IdMap, compareIds, formatId, sameId } from './ids.ts';
 import {
   MAX_INSERT_LENGTH,
   MAX_SPAN_LENGTH,
@@ -35,6 +35,22 @@ export type Change =
 export interface RgaOptions {
   /** Where the Lamport clock starts (default 0). Tests start it near 2^31 and 2^53 to try large counters. */
   readonly clock?: number;
+}
+
+/**
+ * An insert that reuses an id this replica holds, with other content: another character, another origin, or a run
+ * that's partly known (DESIGN.md "Order of delivery, duplicates, and conflicts"). Accepting it would split the
+ * replicas apart for good, so it's refused and nothing changes. Only a buggy or tampered replica can send one.
+ */
+export class ConflictError extends Error {
+  /** The first id of the operation that was already known. */
+  readonly id: Id;
+
+  constructor(id: Id, problem: string) {
+    super(`${formatId(id)}: ${problem}`);
+    this.name = 'ConflictError';
+    this.id = id;
+  }
 }
 
 /** One insert operation's elements, placed together. */
@@ -163,7 +179,8 @@ export class Rga {
   /**
    * Applies an operation from anyone, this replica's own echoes included. Returns the visible changes in order:
    * none for a duplicate or an operation still waiting; when an operation completes the dependencies of waiting
-   * ones, theirs too. Throws ProtocolError for an operation that isn't valid, and changes nothing then.
+   * ones, theirs too. Throws ProtocolError for an operation that isn't valid and ConflictError for one that
+   * reuses a known id with other content, and changes nothing then.
    */
   apply(op: Op): Change[] {
     return this.#apply(validateOp(op));
@@ -174,8 +191,28 @@ export class Rga {
   }
 
   #insert(op: InsertOp): Change[] {
-    if (this.#known.has(op.id)) return [];
     const chars = Array.from(op.text);
+    // A run is created whole by one replica, which never reuses a counter, so a run that arrives again is known
+    // whole, as the same run: the same first id, origin and text. Anything else that touches a known id is a
+    // conflict, so whether two inserts conflict doesn't depend on which arrives first. Waiting runs count: their
+    // elements are known.
+    const known = this.#known.get(op.id);
+    if (known !== undefined) {
+      const run = known.run;
+      if (
+        run.elements[0] === known &&
+        sameId(run.op.origin, op.origin) &&
+        run.op.text === op.text
+      ) {
+        return [];
+      }
+      throw new ConflictError(op.id, `already known, in ${describeRun(run)}`);
+    }
+    for (let i = 1; i < chars.length; i++) {
+      const id = { replica: op.id.replica, counter: op.id.counter + i };
+      const e = this.#known.get(id);
+      if (e !== undefined) throw new ConflictError(id, `already known, in ${describeRun(e.run)}`);
+    }
     this.#clock = Math.max(this.#clock, op.id.counter + chars.length - 1);
     const run: Run = { op, elements: [], placed: false };
     for (let i = 0; i < chars.length; i++) {
@@ -321,6 +358,10 @@ export class Rga {
       `deleted ahead ${this.#deletedAhead.ids().map(formatId).join(' ')}`,
     ].join(' | ');
   }
+}
+
+function describeRun(run: Run): string {
+  return `the run ${formatId(run.op.id)} after ${formatId(run.op.origin)}, ${JSON.stringify(run.op.text)}`;
 }
 
 function describe(e: Element): string {
