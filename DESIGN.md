@@ -69,7 +69,10 @@ The document is a sequence of _elements_. Each element is one Unicode code point
   new replica with a new id.
 - **The Lamport clock.** Each replica keeps `clock`, the largest counter it has seen. A local insert takes
   `clock + 1`; receiving an element with counter `c` sets `clock = max(clock, c)`. So an element inserted by someone
-  who had already seen element `e` has a larger counter than `e`.
+  who had already seen element `e` has a larger counter than `e`. The clock also covers counters a delete names and
+  inserts still waiting for their origin, so a replica's new ids never equal an id it holds, waits for, or has seen
+  deleted, even when a buggy peer used this replica's id. At 2^53 - 1 the clock has run out: edits that need ids
+  are refused (deletes still work).
 - **The order of ids**: by counter, then by replica string (code unit order). It's a total order.
 
 ### Insert
@@ -109,12 +112,22 @@ deletes, as spans of consecutive counters of one replica, since a deleted range 
 - **Any order.** An insert depends on its origin and a delete on its targets. A replica that receives an operation
   before its dependencies keeps it in a pending set and applies it when they arrive. So the network only has to
   deliver everything eventually; it need not deliver in causal order. The day-2 tests deliver in random orders.
-- **Duplicates.** Inserting an id that exists is a no-op, and deleting a tombstone is a no-op, so redelivery is
+- **Duplicates.** An insert that arrives again is a no-op, and deleting a tombstone is a no-op, so redelivery is
   harmless (the sync client resends after reconnecting, and the server echoes, below).
 - **The same id with different content** (another character or another origin) would split replicas apart for good,
   so it's an error, not a duplicate: the operation is refused. A run is created whole by one replica and its counters
   are never reused, so a resent run is either entirely known (a duplicate) or entirely new; a run that is partly known
-  can only come from a reused counter, and is refused too.
+  can only come from a reused counter, and is refused too. Precisely: an insert is a duplicate only if it is the same
+  run, with the same first id, origin and text; any other insert touching a known id is refused (`ConflictError`),
+  waiting runs included. Matching whole runs, not elements, makes _whether_ two inserts conflict independent of
+  their order (element by element, a run made of the tail of a known run would pass as a duplicate one way round and
+  conflict the other). _Which_ of a conflicting pair is kept still depends on which arrived first, so replicas that
+  receive such a pair in different orders keep different ones; in Coedit's topology the server decides, by refusing
+  the second, and clients only ever see its choice.
+- **Deletes ahead of their inserts.** A delete applies at once to what is here; ids not here yet are remembered, and
+  their elements arrive as tombstones. A delete of an element that is itself waiting for its origin marks it, so it
+  is placed as a tombstone. `pending` counts the distinct operations still waiting (each delete naming a missing id
+  waits for it, not only the first), so like the state it depends only on which operations arrived.
 - **In Coedit's own topology delivery is causal anyway.** A client sends its operations in order on one WebSocket and
   references only elements it got from the server or made itself, so the server always has an operation's
   dependencies when it arrives, and refuses one whose dependencies it lacks (it never holds pending operations). The
@@ -136,26 +149,38 @@ behind the same interface.
 
 ```ts
 class Rga {
-  constructor(replica: string);
+  constructor(replica: string, options?: { clock?: number }); // clock: where the Lamport clock starts (tests)
   text(): string; // the visible text
   readonly length: number; // visible code points
-  /** A local edit, applied at once; returns the operations to send (a delete, then an insert). */
+  readonly clock: number; // the largest counter made or seen
+  /**
+   * A local edit, applied at once; returns the operations to send: deletes, then inserts. One insert carries at
+   * most 10,000 code points and one delete 1,000 spans, so a larger edit becomes several (each insert after the
+   * last). Throws RangeError for a position outside the text, a lone surrogate, or a clock that has run out.
+   */
   edit(index: number, deleteCount: number, text: string): Op[];
   /**
    * Applies an operation from anyone (an echo of this replica's own included). Returns the visible changes, in
    * order: none for a duplicate or for an operation still waiting on a dependency, and, when an operation completes
-   * the dependencies of waiting ones, theirs too. Throws ConflictError for an id reused with different content.
+   * the dependencies of waiting ones, theirs too. Throws ProtocolError for an operation the wire format refuses and
+   * ConflictError for an id reused with different content; either way nothing changes.
    */
   apply(op: Op): Change[];
   /** For presence: the id of the visible element before `index` (null at 0), and where a position is now. */
   idBefore(index: number): Id | null;
-  indexAfter(id: Id | null): number;
+  indexAfter(id: Id | null): number | undefined; // undefined: that element isn't placed here
   readonly pending: number; // operations waiting on a dependency
+  state(): string; // the whole state, canonically: elements, tombstones, waiting runs, ids deleted ahead
 }
 type Change =
   | { type: 'insert'; index: number; text: string }
   | { type: 'delete'; index: number; count: number };
 ```
+
+Indices and counts are in code points; the client converts to UTF-16. A delete reports one change per stretch of
+consecutive visible elements, each index shifted left by the stretches before it, so the changes apply one after
+another. An operation `apply` refuses leaves the replica exactly as it was, clock included, and so does an `edit`
+that throws.
 
 The convergence tests drive it through the simulator's `Subject` interface (`edit` and `apply`), compare `text()`
 across replicas, and also require that every replica's internal sequence (ids, tombstones included) is identical, not
@@ -181,7 +206,7 @@ in a deterministic network simulator (`packages/crdt/test/harness/`, day 1):
   reordering), and one that removes a locally deleted character instead of keeping a tombstone (its texts agree and
   only the state check sees it; with redelivery its texts diverge too). If the harness couldn't catch those, a passing
   RGA would prove nothing.
-- **Day 2 adds**, for RGA: convergence over 2 to 5 replicas, comparing `state()` (ids and tombstones) as well as
+- **Day 2 adds** (built: the `rga` test files in `packages/crdt/test/`), for RGA: convergence over 2 to 5 replicas, comparing `state()` (ids and tombstones) as well as
   text; agreement with a plain string model when edits are made one at a time (`localModel`); runs typed concurrently
   at one spot never interleave, and the backward-typing interleave pinned as documented; refusals for each kind of bad
   operation. Also, from day 1's review:
@@ -191,7 +216,10 @@ in a deterministic network simulator (`packages/crdt/test/harness/`, day 1):
   - **Large counters**: replicas whose clocks start near 2^31 and near 2^53 - 1 - 10,000, since generated schedules
     keep counters under about 100.
   - The pending set: operations whose dependency never arrives stay pending and count in `pending`; nothing else
-    changes.
+    changes. Checked against a model of which operations can apply, over editing sessions with operations withheld.
+  - **What a replica holds depends only on which operations reached it**: the same subset in two generated orders,
+    with duplicates, and in causal order gives the same `state()` and `pending`.
+  - The visible changes: on every delivery, `apply`'s changes replayed on the text before must give the text after.
 
 ## The wire format (day 1)
 
