@@ -134,9 +134,9 @@ test("a delete moves the clock only for this replica's own ids, all of its spans
   assert.equal(rga.text(), 'xy');
 });
 
-// Two mutants survived the tests at 0cbad60 that the review ran (rga-pending.test.ts, written meanwhile, catches both, but only
-// through a generated case): `length` counting an insert's elements deleted ahead, and state() listing the runs
-// waiting on one origin in arrival order rather than id order.
+// Two mutants survived the tests at 0cbad60 that the review ran (rga-pending.test.ts, written meanwhile, catches
+// both, but only through a generated case): `length` counting an insert's elements deleted ahead, and state()
+// listing the runs waiting on one origin in arrival order rather than id order.
 test('length counts only the visible part of an insert whose elements were deleted ahead', () => {
   const rga = new Rga('r');
   rga.apply(del([2, 'a', 2]));

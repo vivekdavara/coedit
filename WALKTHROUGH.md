@@ -220,3 +220,18 @@ pins what the schedules exercise (an operation waited in 61% of seeded schedules
 **Why compute the expected order in the intention test by code units?** Because then the test also pins the id
 order: with `localeCompare` the typists' runs come out in another order and the test fails, which the convergence
 tests alone can't see (every replica in one process shares a locale).
+
+## The reviews (day 2)
+
+**What did the review find, and what was the worst of it?** Three defects and a rule that was too broad. The worst:
+an element releasing the runs waiting on it spread the whole list into `push()`, which overflows the stack at about
+110,000 arguments, and by then the releasing insert was placed and the runs were out of the waiting map, so they were
+lost for good. Unrealistic in an editor, but it broke the one property a CRDT can't break: an operation either applies
+or changes nothing. Also: `edit()` returned an internal id object as the insert's origin (a caller changing it renamed
+an element), `pending` depended on arrival order (fixed already), and a delete naming 2^53 - 1 of anyone used up the
+clock.
+
+**How do you test a stack overflow at 110,000 runs without a slow test?** Run the same scenario in a child process
+with a smaller stack (`--stack-size=100`), where the old code overflowed at 20,000 runs and not at 5,000; 20,000 runs
+place in about 30 ms. And make the mistake hard to repeat: an ESLint rule forbids spreading into `push` or `unshift`
+in the CRDT's sources. The one spread left, into `splice`, is bounded by a run's 10,000 elements.

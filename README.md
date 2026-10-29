@@ -191,6 +191,37 @@ Measured on an Apple M3 (macOS 26.6.2, Node 23.11.0, on AC, awake throughout). A
   `test/exports.test.ts`: every workspace export imports.
 - `review1-*.test.ts`, `review2-*.test.ts`: the reviews' findings, each of which failed before its fix.
 
+## Review of day 2
+
+One review agent at a time, each in its own worktree with a correctness brief, writing each finding as a failing test
+(`packages/crdt/test/review1-rga.test.ts` holds them).
+
+**Round 1** (at `0cbad60`, the core with its tests; 14 minutes) reproduced 3 defects and one rule that was too broad:
+
+1. **`pending` depended on arrival order**: only the first delete naming a missing id waited for it, so two deletes
+   naming the same missing id counted as one or two. I had found and fixed it meanwhile (`63e271a`, with
+   `rga-pending.test.ts`); the review's honest-replica case is kept as a test.
+2. **Releasing about 110,000 runs waiting on one element overflowed the stack** (`queue.push(...waiting)`) after the
+   releasing insert was placed and the runs taken out of the waiting map: they were lost for good (known, so a resend
+   was a duplicate; never placed; not pending). `state()` spread the same list. Both push one at a time; an ESLint
+   rule forbids spreading into `push` in the CRDT; the test runs the fan-out in a child process with a 100 KB stack,
+   where the old code overflowed at 20,000 runs (`584a0fd`).
+3. **`edit()` returned the origin element's own id object** as the insert's origin, so changing the returned operation
+   renamed an element inside the replica. Fixed with a copy, and a property that changes every field of every
+   returned operation (`d2eaeab`).
+4. **The clock moved for every span of every delete**, so one delete naming 2^53 - 1 of any replica stopped this
+   replica's inserts for good. Only spans under the replica's own id need to (`410c093`).
+
+Of its mutants, 4 survived the tests at `0cbad60`: `length` counting elements deleted ahead and `state()` listing
+waiting runs in arrival order (both caught by `rga-pending.test.ts` by then, and pinned directly in `55dec77`), the
+delete's clock update applied to the first span only (pinned in `410c093`), and releasing waiting runs in reverse
+order, which is harmless (the changes are still a valid sequence). Five more were equivalent. Its census of 3,000
+schedules (seed 7) showed what the convergence generator reaches: an insert waiting for its origin in 52.1% of
+schedules, a chain of two or more waiting runs in 9.7%, a delete naming an id another delete already waits for in
+17.7%, a delete of an element in a waiting run in 14.6%, a duplicate of a waiting run in 7.4%; and what it never
+makes: conflicts, forged ids, a fan-out large enough for finding 2, or dependencies that never arrive (which
+`rga-pending.test.ts` covers by withholding operations).
+
 ## Review of day 1
 
 Two review agents, one after the other, each in its own worktree with a correctness brief, writing each finding as a
