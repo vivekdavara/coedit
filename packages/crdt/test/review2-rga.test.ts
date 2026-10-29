@@ -103,3 +103,19 @@ describe('the capacity', () => {
     refused(rga, () => rga.apply(del([1, 'a', 2])));
   });
 });
+
+// A surviving mutant of review 2: keying a waiting delete by the set of ids it names rather than by its spans.
+// pending counts operations, and two deletes naming the same ids through different spans are two operations
+// (no generated session makes such a pair, so nothing else pinned it).
+test('two deletes naming the same missing ids through different spans count as two', () => {
+  const rga = new Rga('r');
+  rga.apply(del([1, 'a', 2]));
+  rga.apply(del([1, 'a', 1], [2, 'a', 1]));
+  rga.apply(del([2, 'a', 1], [1, 'a', 1]));
+  assert.equal(rga.pending, 3);
+  rga.apply(del([1, 'a', 1], [2, 'a', 1]));
+  assert.equal(rga.pending, 3, 'the same spans again are the same operation');
+  rga.apply(insert(1, 'a', 'xy'));
+  assert.equal(rga.pending, 0);
+  assert.equal(rga.text(), '');
+});
