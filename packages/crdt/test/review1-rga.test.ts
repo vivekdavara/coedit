@@ -133,3 +133,38 @@ test("a delete moves the clock only for this replica's own ids, all of its spans
   assert.deepEqual(op.id, { replica: 'a', counter: 12 });
   assert.equal(rga.text(), 'xy');
 });
+
+// Two mutants survived the tests at 0cbad60 that the review ran (rga-pending.test.ts, written meanwhile, catches both, but only
+// through a generated case): `length` counting an insert's elements deleted ahead, and state() listing the runs
+// waiting on one origin in arrival order rather than id order.
+test('length counts only the visible part of an insert whose elements were deleted ahead', () => {
+  const rga = new Rga('r');
+  rga.apply(del([2, 'a', 2]));
+  rga.apply({ type: 'insert', id: { replica: 'a', counter: 1 }, origin: null, text: 'abcd' });
+  assert.equal(rga.text(), 'ad');
+  assert.equal(rga.length, 2);
+  assert.deepEqual(rga.edit(2, 0, 'e'), [
+    {
+      type: 'insert',
+      id: { replica: 'r', counter: 5 },
+      origin: { replica: 'a', counter: 4 },
+      text: 'e',
+    },
+  ]);
+  assert.equal(rga.text(), 'ade');
+});
+
+test('state() lists runs waiting on one origin in id order, whatever order they arrived in', () => {
+  const runs = ['x', 'y', 'z'].map((replica, i) => ({
+    type: 'insert' as const,
+    id: { replica, counter: 5 - i },
+    origin: { replica: 'q', counter: 1 },
+    text: replica,
+  }));
+  const forwards = new Rga('r');
+  for (const op of runs) forwards.apply(op);
+  const backwards = new Rga('r');
+  for (const op of [...runs].reverse()) backwards.apply(op);
+  assert.equal(forwards.state(), backwards.state());
+  assert.match(forwards.state(), /waiting 3@z<1@q"z", 4@y<1@q"y", 5@x<1@q"x" \|/);
+});
