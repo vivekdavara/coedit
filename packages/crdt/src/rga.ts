@@ -312,7 +312,13 @@ export class Rga {
     const targets = new Set<Element>();
     let wait: DeleteWait | null = null;
     for (const span of op.spans) {
-      this.#clock = Math.max(this.#clock, span.counter + span.length - 1);
+      // This replica's next ids must not be ones a delete has named ahead, or its next insert would arrive
+      // deleted (only a buggy peer can name them). Other replicas' counters needn't move the clock: a delete
+      // makes no element that could be an origin, and a delete naming 2^53 - 1 of anyone would otherwise stop this
+      // replica's inserts for good (review 1).
+      if (span.replica === this.replica) {
+        this.#clock = Math.max(this.#clock, span.counter + span.length - 1);
+      }
       for (let i = 0; i < span.length; i++) {
         const id = { replica: span.replica, counter: span.counter + i };
         const e = this.#known.get(id);

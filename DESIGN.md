@@ -69,10 +69,11 @@ The document is a sequence of _elements_. Each element is one Unicode code point
   new replica with a new id.
 - **The Lamport clock.** Each replica keeps `clock`, the largest counter it has seen. A local insert takes
   `clock + 1`; receiving an element with counter `c` sets `clock = max(clock, c)`. So an element inserted by someone
-  who had already seen element `e` has a larger counter than `e`. The clock also covers counters a delete names and
-  inserts still waiting for their origin, so a replica's new ids never equal an id it holds, waits for, or has seen
-  deleted, even when a buggy peer used this replica's id. At 2^53 - 1 the clock has run out: edits that need ids
-  are refused (deletes still work).
+  who had already seen element `e` has a larger counter than `e`. The clock also covers inserts still waiting for
+  their origin and the ids a delete names under this replica's own id, so its new ids never equal an id it holds,
+  waits for, or has seen deleted, even when a buggy peer used this replica's id. A delete of other replicas' ids
+  doesn't move it: it makes no element that could be an origin, and one naming 2^53 - 1 would otherwise stop every
+  insert. At 2^53 - 1 the clock has run out: edits that need ids are refused (deletes still work).
 - **The order of ids**: by counter, then by replica string (code unit order). It's a total order.
 
 ### Insert

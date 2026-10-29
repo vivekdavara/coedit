@@ -116,3 +116,20 @@ test('changing anything in any operation an edit returned changes nothing in the
     { numRuns: 300 },
   );
 });
+
+// From the review's notes on the spec: the clock moved for every span of every delete, so one delete naming
+// 2^53 - 1 of any replica stopped this replica's inserts for good. Only spans under this replica's own id need to
+// move it (so its next ids aren't ones deleted ahead); and every such span must, not only the first (a mutant
+// that skipped later spans survived the day's tests).
+test("a delete moves the clock only for this replica's own ids, all of its spans", () => {
+  const rga = new Rga('a', { clock: 3 });
+  rga.apply(
+    del([9, 'b', 2], [4, 'a', 1], [Number.MAX_SAFE_INTEGER, 'c', 1], [9, 'a', 3], [7, 'b', 1]),
+  );
+  assert.equal(rga.clock, 11);
+  assert.equal(rga.pending, 1);
+  // The next ids are 12 and 13: not deleted ahead, so the text shows.
+  const [op] = rga.edit(0, 0, 'xy') as [InsertOp];
+  assert.deepEqual(op.id, { replica: 'a', counter: 12 });
+  assert.equal(rga.text(), 'xy');
+});

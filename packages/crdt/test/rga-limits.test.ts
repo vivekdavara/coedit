@@ -123,15 +123,21 @@ describe('a clock near 2^53 - 1', () => {
     receivedBy([...ops, ...deletion], rga);
   });
 
-  test('is where a remote insert or delete near the end of the range leaves it', () => {
+  test('is where a remote insert near the end of the range leaves it', () => {
     const rga = new Rga('b');
     rga.apply({ type: 'insert', id: { replica: 'a', counter: MAX - 1 }, origin: null, text: 'xy' });
     assert.equal(rga.clock, MAX);
     assert.throws(() => rga.edit(0, 0, 'z'), RangeError);
-    const other = new Rga('c', { clock: 5 });
-    other.apply({ type: 'delete', spans: [{ replica: 'a', counter: MAX - 1, length: 2 }] });
-    assert.equal(other.clock, MAX, 'a delete naming ids not yet here moves the clock too');
-    assert.equal(other.pending, 1);
+  });
+
+  test("is not moved by a delete naming another replica's last counters (review 1)", () => {
+    const rga = new Rga('c', { clock: 5 });
+    rga.apply({ type: 'delete', spans: [{ replica: 'a', counter: MAX - 1, length: 2 }] });
+    assert.equal(rga.clock, 5);
+    assert.equal(rga.pending, 1);
+    assert.deepEqual(rga.edit(0, 0, 'z'), [
+      { type: 'insert', id: { replica: 'c', counter: 6 }, origin: null, text: 'z' },
+    ]);
   });
 
   test('an edit that needs one counter more than is left is refused', () => {

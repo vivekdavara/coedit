@@ -174,10 +174,12 @@ Now each delete waits for all of its own missing ids, so `pending`, like `state(
 arrived. `rga-pending.test.ts` checks both against a model; its first counterexample was a flaw in my model, not the
 code: two replicas deleting the same text at once make byte-identical deletes, which a replica can't tell apart.
 
-**Why is the Lamport clock bumped by deletes and waiting inserts too?** So a replica's next id is never one it already
-knows of. If a buggy peer used my replica id at counter 50 in an insert still waiting, or deleted `50@me` ahead of
-time, and my clock were 10, my next edit would make `11@me`... and eventually `50@me`, which would conflict or arrive
-pre-deleted. Covering every counter seen rules it out.
+**Why is the Lamport clock bumped by waiting inserts and some deletes too?** So a replica's next id is never one it
+already knows of. If a buggy peer used my replica id at counter 50 in an insert still waiting, or deleted `50@me` ahead
+of time, and my clock were 10, my next edits would make `11@me`... and eventually `50@me`, which would conflict or
+arrive pre-deleted. So waiting inserts move the clock, and so do delete spans under my own id. At first every delete
+span moved it; review 1 pointed out that one delete naming `9007199254740991@anyone` then stopped my inserts for
+good, while other replicas' ids can never collide with mine. Now only my own do.
 
 **Why one array and linear scans?** It's the simplest structure whose correctness is easy to see, and the tests are
 about correctness. Every operation is O(n): finding the origin, counting visible elements, splicing. Day 4 measures

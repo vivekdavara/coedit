@@ -294,7 +294,7 @@ describe('operations that arrive before their dependencies', () => {
     const ops = [...a.edit(0, 0, 'abc'), ...a.edit(0, 2, '')];
     assert.deepEqual(apply(b, ops[1] as Op), []);
     assert.equal(b.pending, 1);
-    assert.equal(b.clock, 2, 'the clock covers ids named by a delete too');
+    assert.equal(b.clock, 0, "a delete of another replica's ids doesn't move the clock");
     // The insert's change shows only the element not deleted.
     assert.deepEqual(apply(b, ops[0] as Op), [{ type: 'insert', index: 0, text: 'c' }]);
     assert.equal(b.pending, 0);

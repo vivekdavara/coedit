@@ -261,8 +261,9 @@ support this machine's Node 23).
   the CRDT itself.
 - Which of two conflicting inserts a replica keeps depends on which arrived first; that the pair conflicts doesn't. The
   server settles it by refusing the second (day 3).
-- A peer can exhaust a replica's clock by naming counter 2^53 - 1 in any operation; edits that need ids are then
-  refused. Again only a buggy or tampered peer can, and the server will refuse it.
+- A peer can exhaust a replica's clock with an insert at counter 2^53 - 1 (a delete naming another replica's ids no
+  longer moves the clock, since review 1); edits that need ids are then refused. Only a buggy or tampered peer can,
+  and the server will have to refuse such counters.
 - Text typed backwards at one spot interleaves with concurrent text typed the same way (RGA's known weakness, pinned
   by a test); grapheme clusters can be split by concurrent edits (code points can't).
 
