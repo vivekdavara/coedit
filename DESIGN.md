@@ -151,7 +151,7 @@ behind the same interface.
 
 ```ts
 class Rga {
-  // clock: where the Lamport clock starts (tests). capacity: see below (default and most 2^24 - 1).
+  // clock: where the Lamport clock starts (tests). capacity: see below (default and most 2^23 - 1).
   constructor(replica: string, options?: { clock?: number; capacity?: number });
   text(): string; // the visible text
   readonly length: number; // visible code points
@@ -184,10 +184,12 @@ type Change =
 Indices and counts are in code points; the client converts to UTF-16. A delete reports one change per stretch of
 consecutive visible elements, each index shifted left by the stretches before it, so the changes apply one after
 another. An operation `apply` refuses leaves the replica exactly as it was, clock included, and so does an `edit`
-that throws. That includes running out of room: a V8 Map holds at most 2^24 entries, so a replica holds at most
-2^24 - 1 elements (tombstones and waiting ones included), as many ids deleted ahead, and as many waiting deletes (its
-_capacity_), and refuses up front an operation that would hold more, rather than have a Map refuse it halfway
-(review 2 of day 2 found two valid deletes that did). Replicas holding different things may then disagree about
+that throws. That includes running out of room: a V8 Map's table holds at most 2^24 entries, deleted ones included
+until it rehashes, and a full table can only compact (rather than grow, which fails) when at least half of it is
+deleted entries. So a replica holds at most 2^23 - 1 elements (tombstones and waiting ones included), as many ids
+deleted ahead, and as many waiting deletes (its _capacity_), and refuses up front an operation that would hold more,
+rather than have a Map refuse it halfway (reviews 2 and 3 of day 2 found valid deletes that did, at 2^24 and then at
+about 2^23 live entries). Replicas holding different things may then disagree about
 whether to accept an operation, like any resource limit; the server (day 3) refuses such operations first.
 
 The convergence tests drive it through the simulator's `Subject` interface (`edit` and `apply`), compare `text()`

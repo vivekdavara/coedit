@@ -234,17 +234,26 @@ clock.
 
 **How do you test a stack overflow at 110,000 runs without a slow test?** Run the same scenario in a child process
 with a smaller stack (`--stack-size=100`), where the old code overflowed at 20,000 runs and not at 5,000; 20,000 runs
-place in about 30 ms. And make the mistake hard to repeat: an ESLint rule forbids spreading into `push` or `unshift`
+place in about 30 ms. And make the mistake hard to repeat: an ESLint rule forbids spreading into any call, and `apply`
+and `Reflect` (it started as `push` and `unshift` only; rounds 2 and 3 found the ways round that)
 in the CRDT's sources. The one spread left, into `splice`, is bounded by a run's 10,000 elements.
 
 **What did the second review find?** That round 1's fixes held, and something older: a V8 `Map` holds at most 2^24
 entries, so two maximal deletes of ids not yet present overflowed the deleted-ahead map partway through the second,
 which then threw with half its ids recorded. JavaScript gives no way to make `Map.set` infallible, so the replica checks
-first: it has a capacity (2^24 - 1 of each kind of entry) and refuses, before changing anything, an operation that
-would pass it. Refusal by capacity is the one way two replicas can disagree about accepting a valid operation, like any
+first: it has a capacity (2^24 - 1 of each kind of entry, then 2^23 - 1 after round 3) and refuses, before changing
+anything, an operation that would pass it. Refusal by capacity is the one way two replicas can disagree about accepting a valid operation, like any
 resource limit; the day-3 server refuses such operations before any client sees them.
 
 **What did you learn from the reviews about your measurement scripts?** That a smoke test checking a script's output
 format proves little if the script prints what it was asked to do instead of what it did. Both day-2 scripts passed
 with a mutant that measured nothing. Now they print fast-check's own run count and the replica's own count of what it
 holds, so a script that stops measuring prints a number the smoke test refuses.
+
+**And the third?** That my capacity was still too high. A V8 Map's table holds 2^24 entries, but deleted entries stay in
+it as holes until it rehashes, and a full table can only compact (instead of growing past the limit) if at least half
+of it is holes. The deleted-ahead map loses an entry whenever an id arrives, so it could fail with about 2^23 live
+entries. I checked it with a plain Map before changing anything (holding 2^23 + 2 entries while deleting one and adding
+one throws; 2^23 holds through 20 million turns), then lowered the capacity to 2^23 - 1 and churned 8.4 million ids
+through a full deleted-ahead map as a check. The pattern of the day: each round found a bug in the previous round's
+fix, and each time the fix's own claim ("the most a Map holds") was what was wrong.

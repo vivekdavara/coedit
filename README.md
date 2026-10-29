@@ -106,9 +106,10 @@ synthetic.
   the splits and the clock's limit off by one, the presence methods counting tombstones) fails at least one test,
   most of them 3 to 7. Two guards failed none and were found to be unobservable (see the WALKTHROUGH); one was
   removed.
-- **The worst delete** (`npm run worst-delete -w @coedit/crdt -- 1000 twice` at `a2ea2e7`): 10 million ids deleted
-  ahead of their inserts from one 48,936-byte message, 3.6 s and +982 MiB of heap; a second such delete refused for
-  the capacity in 1.1 s (the count of its ids), nothing changed. See "Limitations (day 2)".
+- **The worst delete** (`npm run worst-delete -w @coedit/crdt` at `617d125`): the wire format's largest, 10 million
+  absent ids in a 48,936-byte message, is refused for the capacity in 69 ms, nothing changed. With `-- 800 twice`: 8
+  million ids deleted ahead from a 39,136-byte message, 2.4 s and +651 MiB of heap, and a second such delete refused
+  in 1.1 s (the count of its ids). See "Limitations (day 2)".
 
 ## Results (day 1)
 
@@ -207,7 +208,8 @@ One review agent at a time, each in its own worktree with a correctness brief, w
 2. **Releasing about 110,000 runs waiting on one element overflowed the stack** (`queue.push(...waiting)`) after the
    releasing insert was placed and the runs taken out of the waiting map: they were lost for good (known, so a resend
    was a duplicate; never placed; not pending). `state()` spread the same list. Both push one at a time; an ESLint
-   rule forbids spreading into `push` in the CRDT; the test runs the fan-out in a child process with a 100 KB stack,
+   rule (broadened after rounds 2 and 3 to every spread into a call, `apply` and `Reflect`) keeps it out of the CRDT;
+   the test runs the fan-out in a child process with a 100 KB stack,
    where the old code overflowed at 20,000 runs (`584a0fd`).
 3. **`edit()` returned the origin element's own id object** as the insert's origin, so changing the returned operation
    renamed an element inside the replica. Fixed with a copy, and a property that changes every field of every
@@ -230,8 +232,8 @@ sound and reproduced one older defect that contradicted a promise DESIGN.md had 
 
 1. **A V8 Map holds at most 2^24 entries**, and two valid deletes of 10 million absent ids each overflowed the
    deleted-ahead map partway through the second, leaving it half applied and uncounted. A replica now has a capacity
-   (2^24 - 1 elements, ids deleted ahead and waiting deletes, each) and refuses an operation past it before changing
-   anything (`80b615f`); the review's own case at full size passes.
+   (of elements, ids deleted ahead and waiting deletes, each) and refuses an operation past it before changing
+   anything (`80b615f`; 2^24 - 1 then, 2^23 - 1 after round 3); the review's own case at full size passes.
 
 The rest was about measuring and testing: both scripts passed their smoke tests with six one-line mutants (a deep run
 of 1 schedule still printed "20,000 pass"; worst-delete computed its id count from its arguments), so they now print
@@ -240,6 +242,16 @@ eight ways to pass a list as arguments, all flagged now (`19fd1f7`); a key of a 
 its spans survived (pinned, `a2ea2e7`); and five docs claims were wrong (a 60 KB message that is 49 KB, the clock
 "largest counter seen", and others; `c7c6237`). Its census of 4,000 editing sessions: a delete waits in 52.5%, a
 waiting delete is resent in 33.0%, concurrent identical deletes in 13.3%, a delete naming an id twice in none.
+
+**Round 3** (on round 2's fixes only, `55dec77..c7c6237`; 11 minutes) found round 2's capacity too high: a Map's table
+holds 2^24 entries **deleted ones included**, and a full table only compacts when half of it is deleted entries, so a
+map that loses entries (deleted-ahead ids do, whenever their insert arrives) could still throw halfway with about 2^23
+live ones; and IdMap counted an entry before its `set` succeeded. Measured with a plain Map holding N entries while
+deleting one and adding one, 20 million times: N = 2^23 - 1 and 2^23 hold, 2^23 + 2 throws. The capacity is now
+2^23 - 1, IdMap counts after the set (`617d125`); a one-off run churning 8.38 million ids through a full deleted-ahead
+map raised nothing. It also found four checks' boundaries and `sizes()` unpinned (pinned), four ways round the lint
+rule plus a false positive (fixed, `f8b2a40`), a heap figure printed in the wrong unit passing the smoke test, and
+stale wording about the lint rule and the capacity.
 
 ## Review of day 1
 
@@ -304,12 +316,15 @@ support this machine's Node 23).
 - Every operation scans one array: O(n) in the document's elements, tombstones included, and tombstones are never
   collected yet. Day 4 measures it and collects what it can prove unneeded.
 - **One valid delete can name 10 million ids** (1,000 spans of 10,000), and a replica holding none of them records
-  each as deleted ahead: 3.6 s and +982 MiB of heap for one 48,936-byte message (0.16 s and +82 MiB for 100 spans,
-  4,836 bytes), measured with `npm run worst-delete -w @coedit/crdt` (add `-- 100` for 100 spans). In
+  each as deleted ahead, up to its capacity of 2^23 - 1 (8,388,607): the full 10 million are refused, 8 million (800
+  spans, a 39,136-byte message) take 2.4 s and +651 MiB of heap (0.16 s and +82 MiB for 100 spans, 4,836 bytes),
+  measured with `npm run worst-delete -w @coedit/crdt` (add `-- 800` for 800 spans). Before the capacity, the full
+  delete took 3.6 s and +982 MiB. In
   Coedit's topology clients only receive what the server accepted, and the server (day 3) must refuse operations whose
   dependencies it lacks, checking spans against runs rather than id by id. Storing absent ids as spans would fix it in
-  the CRDT itself. A second such delete would pass the replica's capacity (2^24 - 1 ids deleted ahead, the most a V8
-  Map holds) and is refused before anything changes; before review 2 it overflowed a Map halfway.
+  the CRDT itself. The capacity is also what keeps V8's Maps from refusing a `set` halfway: a Map's table holds 2^24
+  entries, deleted ones included, so one that has lost entries can fail with about 2^23 live ones (reviews 2 and 3).
+  It also caps a document at 8,388,607 elements, tombstones and waiting ones included.
 - Which of two conflicting inserts a replica keeps depends on which arrived first; that the pair conflicts doesn't. The
   server settles it by refusing the second (day 3).
 - A peer can exhaust a replica's clock with an insert at counter 2^53 - 1, or a delete naming this replica's own id
