@@ -42,12 +42,12 @@ export default tseslint.config(
   },
   {
     // A list passed as arguments goes on the stack: about 110,000 overflow it. The CRDT holds lists of any length
-    // (runs waiting on one element, review 1 of day 2), so its sources may not spread into a call, nor touch
-    // Function.prototype.apply or Reflect at all (reviews 2 and 3 listed the ways round narrower rules:
-    // a['push'](...b), push.apply, Function.prototype.apply.call, Reflect.construct, a destructured apply). The
-    // property names apply and construct are refused wherever they're read, which also refuses calling another
-    // object's Rga.apply from here (this.#apply is a private name, so it's allowed); a spread whose length is
-    // bounded says so in an eslint-disable comment.
+    // (runs waiting on one element, review 1 of day 2), so its sources may not spread into a call, nor name
+    // Function.prototype.apply, construct or Reflect in any way a rule can see: dotted, as a literal or built-up key,
+    // as a destructured key, through a property descriptor or globalThis (reviews 2 to 4 found the ways round each
+    // narrower rule). What no syntactic rule can see is a key held in a variable (`fp[k]`), so this guards against
+    // the ordinary mistake, not against code written to get past it. this.#apply is a private name and allowed; a
+    // spread whose length is bounded says so in an eslint-disable comment. test/lint-rule.test.ts pins all of it.
     files: ['packages/crdt/src/**/*.ts'],
     rules: {
       'no-restricted-syntax': [
@@ -58,8 +58,16 @@ export default tseslint.config(
             'A list of unbounded length spread into a call can overflow the stack; loop instead.',
         },
         {
-          selector:
-            "MemberExpression[property.type='Identifier'][property.name=/^(apply|construct)$/], MemberExpression[computed=true][property.value=/^(apply|construct)$/], Identifier[name='Reflect']",
+          selector: [
+            "MemberExpression[property.type='Identifier'][property.name=/^(apply|construct)$/]",
+            'MemberExpression[computed=true][property.value=/^(apply|construct)$/]',
+            'MemberExpression[computed=true][property.type=/^(TemplateLiteral|TaggedTemplateExpression)$/]',
+            "MemberExpression[computed=true][property.type='BinaryExpression'][property.left.raw=/^['\"]/]",
+            "MemberExpression[computed=true][property.type='BinaryExpression'][property.right.raw=/^['\"]/]",
+            "Property[key.type='Identifier'][key.name=/^(apply|construct)$/]",
+            'Property[key.value=/^(apply|construct)$/]',
+            'Identifier[name=/^(Reflect|globalThis|getOwnPropertyDescriptors?)$/]',
+          ].join(', '),
           message:
             'apply and Reflect pass a list as arguments, which can overflow the stack; loop instead.',
         },
