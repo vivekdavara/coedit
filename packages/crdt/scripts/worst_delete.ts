@@ -1,6 +1,7 @@
-// The largest delete the wire format allows, 1,000 spans of 10,000 ids, applied to a replica that holds none of
-// them: each id is recorded as deleted ahead of its insert. With `twice`, a second such delete (other ids) follows,
-// which passes the replica's capacity and must be refused. README "Limitations (day 2)" quotes it.
+// A delete of `spans` spans of 10,000 ids (the wire format allows 1,000) applied to a replica that holds none of
+// them: each id is recorded as deleted ahead of its insert, up to the replica's capacity (2^23 - 1 by default, so
+// the full 1,000 spans are refused). With `twice`, a second such delete of other ids follows; it is refused if the
+// two would pass the capacity. README "Limitations (day 2)" quotes it.
 // Run: npm run worst-delete -w @coedit/crdt -- [spans] [twice] [capacity]
 import { MAX_SPAN_LENGTH, MAX_SPANS, encodeClientMessage, type DeleteOp } from '../src/protocol.ts';
 import { MAX_CAPACITY, Rga } from '../src/rga.ts';
@@ -26,7 +27,12 @@ const bytes = encodeClientMessage({ type: 'ops', ops: [op] }).length;
 gc();
 const heap = process.memoryUsage().heapUsed;
 const start = performance.now();
-rga.apply(op);
+let first = 'accepted';
+try {
+  rga.apply(op);
+} catch (error) {
+  first = `refused (${error instanceof Error ? error.name : 'error'})`;
+}
 const ms = performance.now() - start;
 gc();
 const mib = (process.memoryUsage().heapUsed - heap) / 2 ** 20;
@@ -34,7 +40,7 @@ const mib = (process.memoryUsage().heapUsed - heap) / 2 ** 20;
 const { deletedAhead } = rga.sizes();
 console.log(`capacity ${capacity ?? MAX_CAPACITY}`);
 console.log(
-  `${deletedAhead} ids deleted ahead from a ${bytes}-byte message: ${ms.toFixed(1)} ms, heap +${mib.toFixed(0)} MiB, pending ${rga.pending}`,
+  `${first}: ${deletedAhead} ids deleted ahead from a ${bytes}-byte message: ${ms.toFixed(1)} ms, heap +${mib.toFixed(0)} MiB, pending ${rga.pending}`,
 );
 if (twice) {
   const second = performance.now();

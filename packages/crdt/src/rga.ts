@@ -32,15 +32,22 @@ export type Change =
   | { readonly type: 'insert'; readonly index: number; readonly text: string }
   | { readonly type: 'delete'; readonly index: number; readonly count: number };
 
-/** The most entries a V8 Map holds: past it, `set` throws (review 2 of day 2). */
-export const MAX_CAPACITY = 2 ** 24 - 1;
+/**
+ * The most live entries a V8 Map can be trusted with. A Map's table holds at most 2^24 entries, deleted ones
+ * included until it rehashes, and when the table is full it grows (which fails at that size) unless at least half
+ * of it is deleted entries. So a Map that has lost entries can refuse a `set` with as few as 2^23 + 1 live ones
+ * (review 3 of day 2; measured: holding 2^23 + 2 entries while deleting one and adding one throws, 2^23 holds
+ * through 20 million such turns). Kept at most 2^23 - 1 live entries, a full table is always at least half
+ * deleted entries, so it compacts instead of growing.
+ */
+export const MAX_CAPACITY = 2 ** 23 - 1;
 
 export interface RgaOptions {
   /** Where the Lamport clock starts (default 0). Tests start it near 2^31 and 2^53 to try large counters. */
   readonly clock?: number;
   /**
    * The most elements, the most ids deleted ahead, and the most waiting deletes this replica holds, each counted
-   * on its own (default and maximum MAX_CAPACITY, 2^24 - 1). An operation that would hold more is refused with
+   * on its own (default and maximum MAX_CAPACITY, 2^23 - 1). An operation that would hold more is refused with
    * RangeError before anything changes, instead of a Map refusing it halfway. Tests set it small.
    */
   readonly capacity?: number;
@@ -116,7 +123,7 @@ export class Rga {
     }
     const capacity = options.capacity ?? MAX_CAPACITY;
     if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > MAX_CAPACITY) {
-      throw new RangeError(`capacity ${capacity} isn't an integer from 1 to 2^24 - 1`);
+      throw new RangeError(`capacity ${capacity} isn't an integer from 1 to 2^23 - 1`);
     }
     this.replica = replica;
     this.#clock = clock;
@@ -151,6 +158,11 @@ export class Rga {
    */
   get pending(): number {
     return this.#waitingRuns + this.#waitingDeletes.size;
+  }
+
+  /** The most elements, ids deleted ahead and waiting deletes this replica holds, each (RgaOptions.capacity). */
+  get capacity(): number {
+    return this.#capacity;
   }
 
   /**
@@ -348,8 +360,9 @@ export class Rga {
   #delete(op: DeleteOp): Change[] {
     // The same delete still waiting has nothing more to do: whatever it names that has arrived since was deleted
     // on arrival. Without this check a resend (a client resends its outbox on every reconnect) would add a second
-    // wait for the same ids, which would end with the first, so nothing visible changes; it's here so resends don't
-    // pile up. (validateOp wrote the spans with their keys in canonical order.)
+    // wait for the same ids, which would end with the first; nothing visible would change, except that at the
+    // capacity for waiting deletes the resend would be refused (review 3). (validateOp wrote the spans with their
+    // keys in canonical order.)
     const key = JSON.stringify(op.spans);
     if (this.#waitingDeletes.has(key)) return [];
     this.#checkDeleteRoom(op);
@@ -425,8 +438,9 @@ export class Rga {
   /**
    * Refuses, before any change, a delete that would record more ids deleted ahead, or more waiting deletes, than
    * the capacity. Counting needs a pass over every id, so it's skipped when the delete couldn't reach the capacity
-   * even if none of its ids were here. An id named twice by one delete counts twice: refusing a little early is
-   * safe.
+   * even if none of its ids were here. An id named by several of one delete's spans counts once per span, so a
+   * delete of overlapping spans can be refused early (by up to 1,000 times what it would record); only a peer
+   * sending overlapping spans can cause that, and the decision is still the same everywhere.
    */
   #checkDeleteRoom(op: DeleteOp): void {
     let named = 0;

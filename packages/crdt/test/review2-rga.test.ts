@@ -28,10 +28,12 @@ function refused(rga: Rga, act: () => unknown): void {
 // recording about 6.8 million of its ids, before counting it as waiting, so it was half applied (an insert it
 // named then arrived deleted) and invisible to `pending`. The replica now refuses, before changing anything, any
 // operation that would hold more elements, ids deleted ahead or waiting deletes than its capacity (2^24 - 1 by
-// default). Tests use a small capacity; `npm run worst-delete -w @coedit/crdt -- 1000 twice` tries the real one.
+// default; 2^23 - 1 since review 3). Tests use a small capacity; `npm run worst-delete -w @coedit/crdt -- 800 twice`
+// tries the real one.
 describe('the capacity', () => {
   test('defaults to the most a Map holds, and must be from 1 to that', () => {
-    assert.equal(MAX_CAPACITY, 16_777_215);
+    assert.equal(MAX_CAPACITY, 8_388_607);
+    assert.equal(new Rga('a').capacity, MAX_CAPACITY);
     for (const capacity of [0, -1, 1.5, MAX_CAPACITY + 1, Number.NaN]) {
       assert.throws(() => new Rga('a', { capacity }), RangeError, String(capacity));
     }

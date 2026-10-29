@@ -50,8 +50,10 @@ export class IdMap<V> {
       counters = new Map();
       this.#replicas.set(id.replica, counters);
     }
-    if (!counters.has(id.counter)) this.#size++;
+    // Counted after the set succeeds: a Map's set can throw (Rga's capacity keeps it from it).
+    const added = !counters.has(id.counter);
     counters.set(id.counter, value);
+    if (added) this.#size++;
   }
 
   delete(id: Id): boolean {

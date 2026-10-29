@@ -62,13 +62,15 @@ test('worst-delete reports the ids the replica recorded, the time, and a second 
   // overlapping spans, still printed the full count.
   const stdout = await run('../scripts/worst_delete.ts', ['3', 'twice', '50000'], ['--expose-gc']);
   const first =
-    /^30000 ids deleted ahead from a (\d+)-byte message: (\d+\.\d) ms, heap \+(\d+) MiB, pending 1$/m.exec(
+    /^accepted: 30000 ids deleted ahead from a (\d+)-byte message: (\d+\.\d) ms, heap \+(\d+) MiB, pending 1$/m.exec(
       stdout,
     );
   assert.ok(first !== null, stdout);
-  const [bytes, ms] = [Number(first[1]), Number(first[2])];
+  const [bytes, ms, mib] = [Number(first[1]), Number(first[2]), Number(first[3])];
   assert.ok(bytes > 150 && bytes < 250, `${bytes} bytes for 3 spans`);
   assert.ok(ms > 0, stdout);
+  // 30,000 ids ahead take a few MiB; 0 would mean the heap wasn't measured in MiB (review 3).
+  assert.ok(mib >= 1, stdout);
   assert.match(
     stdout,
     /^a second one: refused \(RangeError\) in \d+\.\d ms; then 30000 ids deleted ahead, pending 1$/m,
