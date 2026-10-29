@@ -42,9 +42,12 @@ export default tseslint.config(
   },
   {
     // A list passed as arguments goes on the stack: about 110,000 overflow it. The CRDT holds lists of any length
-    // (runs waiting on one element, review 1 of day 2), so its sources may not spread into a call or pass a list
-    // through apply (review 2 listed the ways round the first rule: a['push'](...b), push.apply, Reflect.apply,
-    // Math.max(...b)). A spread whose length is bounded says so in an eslint-disable comment.
+    // (runs waiting on one element, review 1 of day 2), so its sources may not spread into a call, nor touch
+    // Function.prototype.apply or Reflect at all (reviews 2 and 3 listed the ways round narrower rules:
+    // a['push'](...b), push.apply, Function.prototype.apply.call, Reflect.construct, a destructured apply). The
+    // property names apply and construct are refused wherever they're read, which also refuses calling another
+    // object's Rga.apply from here (this.#apply is a private name, so it's allowed); a spread whose length is
+    // bounded says so in an eslint-disable comment.
     files: ['packages/crdt/src/**/*.ts'],
     rules: {
       'no-restricted-syntax': [
@@ -56,8 +59,9 @@ export default tseslint.config(
         },
         {
           selector:
-            "CallExpression[callee.property.name='apply'][callee.object.type='MemberExpression'], CallExpression[callee.object.name='Reflect'][callee.property.name='apply']",
-          message: 'apply passes a list as arguments, which can overflow the stack; loop instead.',
+            "MemberExpression[property.type='Identifier'][property.name=/^(apply|construct)$/], MemberExpression[computed=true][property.value=/^(apply|construct)$/], Identifier[name='Reflect']",
+          message:
+            'apply and Reflect pass a list as arguments, which can overflow the stack; loop instead.',
         },
       ],
     },
