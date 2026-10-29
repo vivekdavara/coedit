@@ -150,6 +150,27 @@ export class Rga {
   }
 
   /**
+   * What this replica holds, for measurements: every element (placed, tombstones and waiting ones included), the
+   * placed tombstones, the runs and deletes waiting, and the ids deleted ahead. The capacity bounds `elements`,
+   * `deletedAhead` and `waitingDeletes`.
+   */
+  sizes(): {
+    elements: number;
+    tombstones: number;
+    waitingRuns: number;
+    deletedAhead: number;
+    waitingDeletes: number;
+  } {
+    return {
+      elements: this.#known.size,
+      tombstones: this.#elements.length - this.#length,
+      waitingRuns: this.#waitingRuns,
+      deletedAhead: this.#deletedAhead.size,
+      waitingDeletes: this.#waitingDeletes.size,
+    };
+  }
+
+  /**
    * A local edit, in code points: deletes `deleteCount` visible elements from `index`, then inserts `text` there.
    * Applied at once; returns the operations to send, deletes first. A text longer than one insert may carry
    * becomes several inserts, each after the last; a delete of more spans than one may carry, several deletes.

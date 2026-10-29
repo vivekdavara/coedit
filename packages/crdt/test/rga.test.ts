@@ -367,3 +367,29 @@ describe('state()', () => {
     );
   });
 });
+
+describe('sizes()', () => {
+  test('counts elements, tombstones, waiting runs and deletes, and ids deleted ahead', () => {
+    const b = new Rga('b');
+    assert.deepEqual(b.sizes(), {
+      elements: 0,
+      tombstones: 0,
+      waitingRuns: 0,
+      deletedAhead: 0,
+      waitingDeletes: 0,
+    });
+    apply(b, insert(1, 'a', null, 'xyz'));
+    apply(b, del([1, 'a', 2]));
+    apply(b, insert(9, 'c', [8, 'c'], 'vw'));
+    apply(b, del([20, 'q', 3]));
+    apply(b, del([20, 'q', 1], [7, 'q', 1]));
+    assert.deepEqual(b.sizes(), {
+      elements: 5,
+      tombstones: 2,
+      waitingRuns: 1,
+      deletedAhead: 4,
+      waitingDeletes: 2,
+    });
+    assert.equal(b.pending, 3);
+  });
+});

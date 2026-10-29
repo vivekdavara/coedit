@@ -49,17 +49,28 @@ const run = async (script: string, args: string[], flags: string[] = []) =>
     )
   ).stdout;
 
-test('deep-convergence runs every convergence case and says so', async () => {
+test('deep-convergence runs every convergence case and reports how many schedules ran', async () => {
+  // The count comes from fast-check's own report (review 2: a script that ran 1 schedule still printed "20").
   const stdout = await run('../scripts/deep_convergence.ts', ['20']);
   const passed = [...stdout.matchAll(/: 20 schedules pass, \d+\.\d s$/gm)];
   assert.equal(passed.length, 6, stdout);
   assert.match(stdout, /^6 cases pass, \d+\.\d s$/m);
 });
 
-test('worst-delete counts every id it was asked for and leaves the delete waiting', async () => {
-  const stdout = await run('../scripts/worst_delete.ts', ['3'], ['--expose-gc']);
-  const m = /^30000 ids in 3 spans: (\d+) ms, heap \+(\d+) MiB, pending 1$/m.exec(stdout);
-  assert.ok(m !== null, stdout);
-  // 30,000 ids deleted ahead take a few MiB; zero would mean nothing was recorded.
-  assert.ok(Number(m[2]) >= 1, stdout);
+test('worst-delete reports the ids the replica recorded, the time, and a second delete refused', async () => {
+  // Review 2: the id count used to be computed from the arguments, so a script that applied one span, or
+  // overlapping spans, still printed the full count.
+  const stdout = await run('../scripts/worst_delete.ts', ['3', 'twice', '50000'], ['--expose-gc']);
+  const first =
+    /^30000 ids deleted ahead from a (\d+)-byte message: (\d+\.\d) ms, heap \+(\d+) MiB, pending 1$/m.exec(
+      stdout,
+    );
+  assert.ok(first !== null, stdout);
+  const [bytes, ms] = [Number(first[1]), Number(first[2])];
+  assert.ok(bytes > 150 && bytes < 250, `${bytes} bytes for 3 spans`);
+  assert.ok(ms > 0, stdout);
+  assert.match(
+    stdout,
+    /^a second one: refused \(RangeError\) in \d+\.\d ms; then 30000 ids deleted ahead, pending 1$/m,
+  );
 });
