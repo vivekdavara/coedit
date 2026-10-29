@@ -7,64 +7,7 @@ import fc from 'fast-check';
 import type { Op } from '../src/protocol.ts';
 import { Rga } from '../src/rga.ts';
 import { wire } from './harness/rga-subject.ts';
-
-const NAMES = ['m', 'Z', 'b'] as const;
-
-type Step =
-  | {
-      readonly kind: 'edit';
-      readonly by: number;
-      readonly at: number;
-      readonly deleteCount: number;
-      readonly text: string;
-    }
-  | { readonly kind: 'sync'; readonly by: number };
-
-const step: fc.Arbitrary<Step> = fc.oneof(
-  {
-    weight: 3,
-    arbitrary: fc.record(
-      {
-        kind: fc.constant('edit' as const),
-        by: fc.nat({ max: NAMES.length - 1 }),
-        at: fc.nat(),
-        deleteCount: fc.nat({ max: 3 }),
-        text: fc.string({ unit: fc.constantFrom('a', 'b', '😀'), maxLength: 3 }),
-      },
-      { noNullPrototype: true },
-    ),
-  },
-  {
-    weight: 1,
-    arbitrary: fc.record(
-      { kind: fc.constant('sync' as const), by: fc.nat({ max: NAMES.length - 1 }) },
-      { noNullPrototype: true },
-    ),
-  },
-);
-
-/**
- * Every operation of an editing session in which replicas edit concurrently and now and then catch up on
- * everything made so far, in the order they were made (a causal order).
- */
-function session(steps: readonly Step[]): Op[] {
-  const replicas = NAMES.map((name) => new Rga(name));
-  const applied = NAMES.map(() => 0);
-  const ops: Op[] = [];
-  for (const s of steps) {
-    const r = replicas[s.by] as Rga;
-    if (s.kind === 'sync') {
-      for (const op of ops.slice(applied[s.by])) r.apply(op);
-    } else {
-      const index = s.at % (r.length + 1);
-      ops.push(...r.edit(index, Math.min(s.deleteCount, r.length - index), s.text));
-    }
-    applied[s.by] = s.kind === 'sync' ? ops.length : (applied[s.by] as number);
-  }
-  return ops;
-}
-
-const sessions = fc.array(step, { maxLength: 30, size: 'max' }).map(session);
+import { sessions } from './harness/sessions.ts';
 
 /** The operations at `indexes` (with repeats: duplicates), in that order, applied to a new replica through the codec. */
 function receive(ops: readonly Op[], indexes: readonly number[]): Rga {
