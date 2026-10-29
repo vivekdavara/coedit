@@ -440,7 +440,7 @@ export class Rga {
    * the capacity. Counting needs a pass over every id, so it's skipped when the delete couldn't reach the capacity
    * even if none of its ids were here. An id named by several of one delete's spans counts once per span, so a
    * delete of overlapping spans can be refused early (by up to 1,000 times what it would record); only a peer
-   * sending overlapping spans can cause that, and the decision is still the same everywhere.
+   * sending overlapping spans can cause that, and replicas holding the same state still decide the same.
    */
   #checkDeleteRoom(op: DeleteOp): void {
     let named = 0;

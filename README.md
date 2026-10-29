@@ -109,7 +109,7 @@ synthetic.
 - **The worst delete** (`npm run worst-delete -w @coedit/crdt` at `617d125`): the wire format's largest, 10 million
   absent ids in a 48,936-byte message, is refused for the capacity in 69 ms, nothing changed. With `-- 800 twice`: 8
   million ids deleted ahead from a 39,136-byte message, 2.4 s and +651 MiB of heap, and a second such delete refused
-  in 1.1 s (the count of its ids). See "Limitations (day 2)".
+  in 1.1 s (the count of its ids); review 4's runs of the same gave 2.2 s and 1.0 s. See "Limitations (day 2)".
 
 ## Results (day 1)
 
@@ -208,7 +208,8 @@ One review agent at a time, each in its own worktree with a correctness brief, w
 2. **Releasing about 110,000 runs waiting on one element overflowed the stack** (`queue.push(...waiting)`) after the
    releasing insert was placed and the runs taken out of the waiting map: they were lost for good (known, so a resend
    was a duplicate; never placed; not pending). `state()` spread the same list. Both push one at a time; an ESLint
-   rule (broadened after rounds 2 and 3 to every spread into a call, `apply` and `Reflect`) keeps it out of the CRDT;
+   rule (broadened in rounds 2 to 4 to every spread into a call and every visible use of `apply` or `Reflect`; it
+   can't see a key held in a variable, and `test/lint-rule.test.ts` pins both) keeps it out of the CRDT;
    the test runs the fan-out in a child process with a 100 KB stack,
    where the old code overflowed at 20,000 runs (`584a0fd`).
 3. **`edit()` returned the origin element's own id object** as the insert's origin, so changing the returned operation
@@ -252,6 +253,13 @@ deleting one and adding one, 20 million times: N = 2^23 - 1 and 2^23 hold, 2^23 
 map raised nothing. It also found four checks' boundaries and `sizes()` unpinned (pinned), four ways round the lint
 rule plus a false positive (fixed, `f8b2a40`), a heap figure printed in the wrong unit passing the smoke test, and
 stale wording about the lint rule and the capacity.
+
+**Round 4** (on round 3's fixes only, `c7c6237..ee04965`; 8 minutes) confirmed the capacity's reasoning on this
+Node (a full table takes a set only while at most 2^23 entries are live) and found: nine more ways round the lint rule,
+and that no test linted anything (the rule now also refuses built-up and destructured keys, `globalThis` and property
+descriptors, says it can't see a key held in a variable, and `test/lint-rule.test.ts` runs it on 21 refused forms,
+the allowed ones and the two it can't see; `09891e7`); and three of round 3's changes untested (IdMap's count after its
+set, the capacity getter, the script's refused first delete; `bd3f616`). No defect in the CRDT itself.
 
 ## Review of day 1
 
@@ -318,8 +326,8 @@ support this machine's Node 23).
 - **One valid delete can name 10 million ids** (1,000 spans of 10,000), and a replica holding none of them records
   each as deleted ahead, up to its capacity of 2^23 - 1 (8,388,607): the full 10 million are refused, 8 million (800
   spans, a 39,136-byte message) take 2.4 s and +651 MiB of heap (0.16 s and +82 MiB for 100 spans, 4,836 bytes),
-  measured with `npm run worst-delete -w @coedit/crdt` (add `-- 800` for 800 spans). Before the capacity, the full
-  delete took 3.6 s and +982 MiB. In
+  measured with `npm run worst-delete -w @coedit/crdt` (add `-- 800` or `-- 100` for 800 or 100 spans). Before the
+  capacity, the full delete took 3.6 s and +982 MiB. In
   Coedit's topology clients only receive what the server accepted, and the server (day 3) must refuse operations whose
   dependencies it lacks, checking spans against runs rather than id by id. Storing absent ids as spans would fix it in
   the CRDT itself. The capacity is also what keeps V8's Maps from refusing a `set` halfway: a Map's table holds 2^24

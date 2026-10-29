@@ -234,8 +234,10 @@ clock.
 
 **How do you test a stack overflow at 110,000 runs without a slow test?** Run the same scenario in a child process
 with a smaller stack (`--stack-size=100`), where the old code overflowed at 20,000 runs and not at 5,000; 20,000 runs
-place in about 30 ms. And make the mistake hard to repeat: an ESLint rule forbids spreading into any call, and `apply`
-and `Reflect` (it started as `push` and `unshift` only; rounds 2 and 3 found the ways round that)
+place in about 30 ms. And make the mistake hard to repeat: an ESLint rule forbids spreading into any call, and any use
+of `apply` or `Reflect` it can see (it started as `push` and `unshift` only; rounds 2 to 4 found the ways round each
+version, and `test/lint-rule.test.ts` now runs it on all of them). It can't see a key held in a variable (`fp[k]`): a
+lint rule guards against the ordinary mistake, not against code written to get past it.
 in the CRDT's sources. The one spread left, into `splice`, is bounded by a run's 10,000 elements.
 
 **What did the second review find?** That round 1's fixes held, and something older: a V8 `Map` holds at most 2^24
