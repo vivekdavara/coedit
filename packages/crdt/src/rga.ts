@@ -70,8 +70,10 @@ interface Element {
   deleted: boolean;
 }
 
-/** A delete that named ids before their insert arrived; it waits until `remaining` of them have arrived. */
+/** A delete that named ids before their insert arrived: it waits until all `remaining` of them have arrived. */
 interface DeleteWait {
+  /** The delete's spans, written canonically: the same delete arriving again is the same wait. */
+  readonly key: string;
   remaining: number;
 }
 
@@ -85,9 +87,10 @@ export class Rga {
   /** Runs waiting for their origin, by the origin's id. */
   readonly #waiting = new IdMap<Run[]>();
   #waitingRuns = 0;
-  /** Ids deleted before they arrived, each with the delete that named it first. */
-  readonly #deletedAhead = new IdMap<DeleteWait>();
-  #waitingDeletes = 0;
+  /** Ids deleted before they arrived, each with every delete waiting for it. */
+  readonly #deletedAhead = new IdMap<DeleteWait[]>();
+  /** Deletes still waiting for an id, by key. */
+  readonly #waitingDeletes = new Map<string, DeleteWait>();
   /** Visible elements. */
   #length = 0;
 
@@ -122,9 +125,13 @@ export class Rga {
     return this.#clock;
   }
 
-  /** Operations waiting for a dependency: inserts whose origin hasn't arrived, deletes naming ids that haven't. */
+  /**
+   * Operations waiting for a dependency: inserts whose origin hasn't been placed, deletes naming ids no insert
+   * here has carried. Each distinct operation counts once, however often it arrived, so like the state this
+   * depends only on which operations arrived, not on their order.
+   */
   get pending(): number {
-    return this.#waitingRuns + this.#waitingDeletes;
+    return this.#waitingRuns + this.#waitingDeletes.size;
   }
 
   /**
@@ -224,11 +231,11 @@ export class Rga {
       };
       run.elements.push(e);
       this.#known.set(e.id, e);
-      const wait = this.#deletedAhead.get(e.id);
-      if (wait !== undefined) {
+      const waits = this.#deletedAhead.get(e.id);
+      if (waits !== undefined) {
         this.#deletedAhead.delete(e.id);
         e.deleted = true;
-        if (--wait.remaining === 0) this.#waitingDeletes--;
+        for (const wait of waits) if (--wait.remaining === 0) this.#waitingDeletes.delete(wait.key);
       }
     }
     if (op.origin !== null && this.#known.get(op.origin)?.run.placed !== true) {
@@ -290,6 +297,12 @@ export class Rga {
   }
 
   #delete(op: DeleteOp): Change[] {
+    // The same delete still waiting has nothing more to do: whatever it names that has arrived since was deleted
+    // on arrival. Without this check a resend (a client resends its outbox on every reconnect) would add a second
+    // wait for the same ids, which would end with the first, so nothing visible changes; it's here so resends don't
+    // pile up. (validateOp wrote the spans with their keys in canonical order.)
+    const key = JSON.stringify(op.spans);
+    if (this.#waitingDeletes.has(key)) return [];
     const targets = new Set<Element>();
     let wait: DeleteWait | null = null;
     for (const span of op.spans) {
@@ -298,10 +311,13 @@ export class Rga {
         const id = { replica: span.replica, counter: span.counter + i };
         const e = this.#known.get(id);
         if (e === undefined) {
-          if (this.#deletedAhead.has(id)) continue;
-          wait ??= { remaining: 0 };
+          // Every delete naming a missing id waits for it, not only the first: otherwise which of two deletes
+          // waits would depend on which arrived first.
+          wait ??= { key, remaining: 0 };
+          const waits = this.#deletedAhead.get(id);
+          if (waits === undefined) this.#deletedAhead.set(id, [wait]);
+          else waits.push(wait);
           wait.remaining++;
-          this.#deletedAhead.set(id, wait);
         } else if (!e.deleted) {
           // An element still waiting for its origin is placed as a tombstone when it's placed.
           if (e.run.placed) targets.add(e);
@@ -309,7 +325,7 @@ export class Rga {
         }
       }
     }
-    if (wait !== null) this.#waitingDeletes++;
+    if (wait !== null) this.#waitingDeletes.set(key, wait);
     if (targets.size === 0) return [];
 
     // One pass over the old sequence: each target's visible index, grouped into runs of consecutive indices, each

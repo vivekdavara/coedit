@@ -318,7 +318,7 @@ describe('operations that arrive before their dependencies', () => {
     assert.equal(b.state(), a.state());
   });
 
-  test('two deletes naming the same missing id: the first waits for it, the second only for its own', () => {
+  test('two deletes naming the same missing id each wait for all of their own', () => {
     const b = new Rga('b');
     apply(b, del([1, 'a', 2]));
     apply(b, del([2, 'a', 2]));
@@ -328,6 +328,28 @@ describe('operations that arrive before their dependencies', () => {
     apply(b, insert(3, 'a', [2, 'a'], 'c'));
     assert.equal(b.pending, 0);
     assert.equal(b.text(), '');
+  });
+
+  test('a delete naming only ids another waiting delete names still counts, in either order', () => {
+    for (const order of [
+      [del([1, 'a', 2]), del([2, 'a', 1])],
+      [del([2, 'a', 1]), del([1, 'a', 2])],
+    ]) {
+      const b = new Rga('b');
+      for (const op of order) apply(b, op);
+      assert.equal(b.pending, 2, JSON.stringify(order));
+      apply(b, insert(2, 'a', null, 'x'));
+      assert.equal(b.pending, 1, 'only the delete of 1@a and 2@a waits now');
+      assert.equal(b.text(), '');
+    }
+  });
+
+  test('a delete naming a missing id twice waits for it once', () => {
+    const b = new Rga('b');
+    apply(b, del([1, 'a', 2], [2, 'a', 1]));
+    assert.equal(b.pending, 1);
+    apply(b, insert(1, 'a', null, 'ab'));
+    assert.equal(b.pending, 0);
   });
 });
 
