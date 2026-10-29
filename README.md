@@ -76,6 +76,37 @@ The server listens on `127.0.0.1:8110` (`COEDIT_HOST`, `COEDIT_PORT`); `curl htt
 `{"status":"ok","protocol":1}`. The client is at `http://localhost:5173`; for now it edits a local document and shows
 the edit each input became.
 
+## Results (day 2)
+
+Measured on the same Apple M3 (macOS 26.6.2, Node 23.11.0, on AC, no sleep in `pmset -g log`). All inputs are
+synthetic.
+
+- **Convergence at depth**: every convergence case passes at 20,000 schedules. Run at `7b2e0d3` (15:24 to 15:26,
+  with a review agent running tests alongside) by a one-off script with the same cases that
+  `npm run deep-convergence -w @coedit/crdt` now runs:
+
+  | Case                                      | Seconds |
+  | ----------------------------------------- | ------: |
+  | 2 to 5 replicas, every freedom on         |     7.3 |
+  | long schedules (80 steps), up to 6        |    48.7 |
+  | causal delivery, no duplicates            |     8.1 |
+  | clocks near 2^31                          |     6.4 |
+  | clocks near 2^53 - 1 - 10,000             |     6.5 |
+  | clocks far apart (0 to 2^53 - 1 - 10,000) |     9.7 |
+
+- **What the schedules exercise** (the coverage test in `packages/crdt/test/rga-convergence.test.ts`, 300 schedules,
+  seed 1): an operation waited for a dependency in 61% of schedules (183), one delivery returned several changes
+  (released waiting operations, or a scattered delete) in 51% (153), and 54% of deliveries (4,316 of 7,958) changed
+  nothing (duplicates, echoes, waits). The test fails below about three quarters of each.
+- **Every mechanism is load-bearing**: each one-line mutant of `rga.ts` and `ids.ts` run today (the skip rule removed
+  or reversed, ties not broken by replica, `localeCompare` for the id order, the cascade of waiting runs dropped,
+  either pre-delete path, the clocks' updates, the change index shift, the four conditions of the duplicate check,
+  the splits and the clock's limit off by one, the presence methods counting tombstones) fails at least one test,
+  most of them 3 to 7. Two guards failed none and were found to be unobservable (see the WALKTHROUGH); one was
+  removed.
+- **The worst delete** (`npm run worst-delete -w @coedit/crdt`): 10 million ids deleted ahead of their inserts, 3.3 s
+  and +982 MiB of heap; see "Limitations (day 2)".
+
 ## Results (day 1)
 
 Measured on an Apple M3 (macOS 26.6.2, Node 23.11.0, on AC, awake throughout). All inputs are synthetic.
@@ -122,6 +153,22 @@ Measured on an Apple M3 (macOS 26.6.2, Node 23.11.0, on AC, awake throughout). A
 
 ## Tests
 
+- `packages/crdt/test/rga-convergence.test.ts`: RGA through the simulator with every freedom on, the real codec as
+  the transport, the state check compulsory, the local model on, and every delivery's changes replayed; 2 to 5
+  replicas, long schedules with up to 6, causal delivery, clocks near 2^31, near 2^53 and far apart; a coverage test
+  pinning what the schedules exercise.
+- `packages/crdt/test/rga-order.test.ts`: the sequence against an independent implementation of the spec (the origin
+  tree, children largest first, in preorder) over 1,000 editing sessions in generated orders.
+- `packages/crdt/test/rga.test.ts`: one behaviour at a time: local edits and their operations, remote operations and
+  their visible changes, concurrent inserts at one spot, a larger insert's subtree skipped, inserts after tombstones,
+  scattered deletes, duplicates and echoes, waiting chains, deletes ahead, refusals that change nothing, `state()`.
+- `packages/crdt/test/rga-pending.test.ts`: over editing sessions with operations withheld, state and `pending` depend
+  only on which operations arrived; `pending` matches a model; the rest delivered later converges.
+- `packages/crdt/test/rga-conflicts.test.ts`: every way to reuse a known id is refused atomically, waiting runs
+  included, and whether two inserts conflict doesn't depend on their order.
+- `packages/crdt/test/rga-intention.test.ts`: concurrent typists at one spot keep their runs whole; backward typing's
+  interleave pinned. `rga-presence.test.ts`: ids for cursors, round trips, a cursor following its text.
+  `rga-limits.test.ts`: splitting long pastes and large deletes, the clock's end. `ids.test.ts`: the id order.
 - `packages/crdt/test/json.test.ts`: the reader against `JSON.parse` (random values at any indentation; 20,000 random
   texts over JSON's alphabet, both surrogate halves included), every refusal, long strings either side of the scan
   window, a million-deep nesting attempt.
@@ -200,6 +247,24 @@ one rule and short proof; code points as elements; any delivery order, with pend
 delivery; a strict reader because `JSON.parse` lets two replicas read one message differently; the server's echo as
 the acknowledgement; Node's type stripping and test runner rather than a build step (and Vitest 5 and ESLint 10 don't
 support this machine's Node 23).
+
+## Limitations (day 2)
+
+- Sync, presence over the network and persistence don't exist yet; the client edits locally (day 3 and 4).
+- Every operation scans one array: O(n) in the document's elements, tombstones included, and tombstones are never
+  collected yet. Day 4 measures it and collects what it can prove unneeded.
+- **One valid delete can name 10 million ids** (1,000 spans of 10,000), and a replica holding none of them records
+  each as deleted ahead: 3.3 s and +982 MiB of heap for one 60 KB operation (0.15 s and +82 MiB for 100 spans),
+  measured with `npm run worst-delete -w @coedit/crdt` (add `-- 100` for 100 spans). In
+  Coedit's topology clients only receive what the server accepted, and the server (day 3) must refuse operations whose
+  dependencies it lacks, checking spans against runs rather than id by id. Storing absent ids as spans would fix it in
+  the CRDT itself.
+- Which of two conflicting inserts a replica keeps depends on which arrived first; that the pair conflicts doesn't. The
+  server settles it by refusing the second (day 3).
+- A peer can exhaust a replica's clock by naming counter 2^53 - 1 in any operation; edits that need ids are then
+  refused. Again only a buggy or tampered peer can, and the server will refuse it.
+- Text typed backwards at one spot interleaves with concurrent text typed the same way (RGA's known weakness, pinned
+  by a test); grapheme clusters can be split by concurrent edits (code points can't).
 
 ## Limitations (day 1)
 

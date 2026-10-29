@@ -202,6 +202,12 @@ properties: concurrent typists at one spot keep their runs whole (`rga-intention
 set of operations received (`rga-pending.test.ts`), a cursor follows its text (`rga-presence.test.ts`), and whether
 two inserts conflict doesn't depend on their order (`rga-conflicts.test.ts`).
 
+**Converging isn't the same as being right. How do you know the order is RGA's?** `rga-order.test.ts` builds the
+order DESIGN.md describes independently: every element a child of its origin, children sorted largest id first (with
+a comparator written in the test, not imported), the tree read in preorder. Over 1,000 editing sessions delivered in
+random orders, the replica's sequence of ids, tombstones included, is exactly that preorder. So the scan-and-skip code
+in `#place` computes the tree the proof is about.
+
 **How do you know those tests can fail?** Every mechanism was removed in turn and the tests run against the mutant:
 removing or reversing the skip rule, dropping the cascade of waiting runs, either pre-delete path, the clock update,
 the change index shift, the run-level duplicate check's four conditions, the limits' splits. Each fails at least one
