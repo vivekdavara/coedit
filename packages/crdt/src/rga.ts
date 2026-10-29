@@ -170,7 +170,9 @@ export class Rga {
     for (let i = 0; i < spans.length; i += MAX_SPANS) {
       ops.push({ type: 'delete', spans: spans.slice(i, i + MAX_SPANS) });
     }
-    let after = origin === null ? null : origin.id;
+    // A copy: the element's own id object would let the caller rename the element through the op (review 1).
+    let after: Id | null =
+      origin === null ? null : { replica: origin.id.replica, counter: origin.id.counter };
     for (let i = 0; i < chars.length; i += MAX_INSERT_LENGTH) {
       const run = chars.slice(i, i + MAX_INSERT_LENGTH);
       const id = { replica: this.replica, counter: this.#clock + 1 + i };

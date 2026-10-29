@@ -4,7 +4,8 @@ import { execFile } from 'node:child_process';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import type { DeleteOp } from '../src/protocol.ts';
+import fc from 'fast-check';
+import type { DeleteOp, InsertOp } from '../src/protocol.ts';
 import { Rga } from '../src/rga.ts';
 
 const del = (...spans: [number, string, number][]): DeleteOp => ({
@@ -67,4 +68,51 @@ test('an element releasing 20,000 waiting runs places them all, even on a small 
     length: 20_001,
     pending: 0,
   });
+});
+
+// Finding 3: edit() returned an insert whose origin was the origin element's own id object, so a caller changing
+// the returned operation renamed an element inside the replica (idBefore and state() then showed an id nobody
+// made, while the id map still filed it under the old one).
+test("changing an edit's returned origin changes nothing in the replica", () => {
+  const rga = new Rga('a');
+  rga.edit(0, 0, 'ab');
+  const [op] = rga.edit(2, 0, 'c') as [InsertOp];
+  const state = rga.state();
+  const origin = op.origin as { replica: string; counter: number };
+  origin.replica = 'zz';
+  origin.counter = 1;
+  assert.equal(rga.state(), state);
+  assert.deepEqual(rga.idBefore(2), { replica: 'a', counter: 2 });
+});
+
+test('changing anything in any operation an edit returned changes nothing in the replica', () => {
+  // Every object reachable from every returned operation, changed in every field it has.
+  const scramble = (value: unknown): void => {
+    if (typeof value !== 'object' || value === null) return;
+    const record = value as Record<string, unknown>;
+    for (const [k, v] of Object.entries(record)) {
+      if (typeof v === 'number') record[k] = v + 1_000;
+      else if (typeof v === 'string') record[k] = k === 'type' ? v : `${v}zz`;
+      else scramble(v);
+    }
+  };
+  fc.assert(
+    fc.property(
+      fc.array(fc.tuple(fc.nat(), fc.nat({ max: 3 }), fc.string({ maxLength: 3 })), {
+        maxLength: 15,
+      }),
+      (edits) => {
+        const scrambled = new Rga('a');
+        const clean = new Rga('a');
+        for (const [at, deleteCount, text] of edits) {
+          const index = at % (clean.length + 1);
+          const count = Math.min(deleteCount, clean.length - index);
+          clean.edit(index, count, text);
+          for (const op of scrambled.edit(index, count, text)) scramble(op);
+          assert.equal(scrambled.state(), clean.state());
+        }
+      },
+    ),
+    { numRuns: 300 },
+  );
 });
