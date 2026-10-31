@@ -24,19 +24,24 @@ test('a client reading as fast as it can gets its whole catch-up, however long t
     writer.send({
       type: 'ops',
       ops: [
-        { type: 'insert', id: { replica: 'w', counter: 1 }, origin: null, text: 'x'.repeat(1_000) },
+        { type: 'insert', id: { replica: 'w', counter: 1 }, origin: null, text: 'x'.repeat(5_000) },
       ],
     });
     await writer.next();
     // A log of about 32 MiB: deletes are logged every time they come (here, 5 of about 40 KB per message, so that no
-    // one echo passes the limit). Each names its 1,000 ids as 1,000 one-id spans: disjoint, since the server
-    // refuses overlapping spans (the review's first version named one id 1,000 times, refused since f0e4ef8).
-    const del: Op = {
+    // one echo passes the limit). Each names 1,000 ids as 1,000 one-id spans, the five of a message 5,000 different
+    // ids: the server refuses overlapping spans (f0e4ef8) and a message naming more ids than the document holds
+    // (review 2); the review's first version named one id 5,000 times a message.
+    const deletes: Op[] = Array.from({ length: 5 }, (_, k) => ({
       type: 'delete',
-      spans: Array.from({ length: 1_000 }, (_, i) => ({ replica: 'w', counter: i + 1, length: 1 })),
-    };
+      spans: Array.from({ length: 1_000 }, (_, i) => ({
+        replica: 'w',
+        counter: k * 1_000 + i + 1,
+        length: 1,
+      })),
+    }));
     for (let m = 0; m < 160; m++) {
-      writer.send({ type: 'ops', ops: Array.from({ length: 5 }, () => del) });
+      writer.send({ type: 'ops', ops: deletes });
       const echo = await writer.next(20_000);
       assert.equal(echo.type, 'ops', JSON.stringify(echo).slice(0, 200));
     }

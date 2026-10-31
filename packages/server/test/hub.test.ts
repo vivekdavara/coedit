@@ -346,6 +346,43 @@ describe('operations', () => {
     assert.equal(hub.text(), 'yz');
   });
 
+  test("refuses a message whose deletes name more ids than the document holds; an honest outbox doesn't", () => {
+    const hub = new DocumentHub('d');
+    const a = joined(hub, 'a');
+    assert.equal(hub.submit(a, [insert(1, 'a', null, 'abcd')]), null);
+    // Each delete is fine alone; together they name 6 ids of a 4-element document.
+    const refusal = hub.submit(a, [del([1, 'a', 2]), del([3, 'a', 2]), del([1, 'a', 2])]);
+    assert.deepEqual(refusal, {
+      code: 'refused-op',
+      message:
+        "ops[2] refused: this message's deletes name 6 ids, more than the 4 elements of this document",
+    });
+    // The two before it were applied and logged.
+    assert.equal(hub.text(), '');
+    assert.equal(hub.seq, 3);
+    // Inserts earlier in the same message count: what a client typed and deleted between two sends.
+    assert.equal(
+      hub.submit(a, [
+        insert(5, 'a', [4, 'a'], 'xyz'),
+        del([5, 'a', 2]),
+        insert(8, 'a', [7, 'a'], '!'),
+        del([7, 'a', 2]),
+      ]),
+      null,
+    );
+    assert.equal(hub.text(), '');
+  });
+
+  test("finds overlaps between spans of one replica with another replica's span between them", () => {
+    const hub = new DocumentHub('d');
+    const a = joined(hub, 'a');
+    // Sorted by counter alone, b's span would sit between a's two and hide the overlap.
+    assert.equal(
+      hub.submit(a, [del([1, 'a', 2], [1, 'b', 5], [2, 'a', 1])])?.message,
+      'ops[0] refused: its spans overlap',
+    );
+  });
+
   test('refuses an insert reusing an id with other content', () => {
     const hub = new DocumentHub('d');
     const a = joined(hub, 'a');

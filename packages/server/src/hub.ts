@@ -185,6 +185,11 @@ export class DocumentHub {
       throw new Error(`${member.replica} isn't joined to ${this.doc}`);
     const from = this.#log.length + 1;
     let refusal: Refusal | null = null;
+    // Ids named by this message's deletes so far. The overlap rule bounds one delete's cost by the document's size,
+    // but a message carries up to 1,000 deletes, which could each name the whole document: 3.9 s for one message of a
+    // 200,000-character document (review 2 of day 3). A client deletes each element at most once, so the deletes of
+    // one honest message name at most as many ids as the document holds.
+    let named = 0;
     for (let i = 0; i < ops.length; i++) {
       const op = ops[i] as Op;
       try {
@@ -192,6 +197,17 @@ export class DocumentHub {
         if (problem !== null) {
           refusal = refused(i, problem);
           break;
+        }
+        if (op.type === 'delete') {
+          for (const span of op.spans) named += span.length;
+          const held = this.#rga.sizes().elements;
+          if (named > held) {
+            refusal = refused(
+              i,
+              `this message's deletes name ${named} ids, more than the ${held} elements of this document`,
+            );
+            break;
+          }
         }
         const duplicate = op.type === 'insert' && this.#rga.has(op.id);
         this.#rga.apply(op);
