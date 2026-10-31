@@ -281,6 +281,7 @@ Server to client:
 | ---------- | ------------------------ | ------------------------------------------------------------------ |
 | `welcome`  | `protocol`, `doc`, `seq` | joined; the log currently ends at `seq`                            |
 | `ops`      | `from`, `ops`            | log entries `from`, `from + 1`, ... (missed ones first, then live) |
+| `snapshot` | `seq`, `ops`, `last`     | day 4: the document after entry `seq`, for a client too far behind |
 | `presence` | `replica`, `cursor`      | someone's selection (`cursor: null`: they left or hid it)          |
 | `error`    | `code`, `message`        | refused; the server closes the connection after it                 |
 
@@ -289,7 +290,8 @@ full), `ahead-of-server` (below) and `server-error`, the only one a client retri
 
 - **The server orders.** It numbers every operation it accepts 1, 2, 3, ... in its log and relays each one to every
   client of the document, the sender included. The echo is the acknowledgement: a client drops an operation from its
-  outbox when it comes back with a sequence number, and the CRDT ignores the duplicate. It costs the sender a copy of
+  outbox when it comes back with a sequence number (or, from day 4, when a snapshot it receives holds it: "Persistence
+  (day 4)"), and the CRDT ignores the duplicate. It costs the sender a copy of
   its own edits; in exchange every client sees the same numbered log, and `have` means the same thing for all.
 - **Reconnect.** The client remembers the last sequence number it applied. On reconnect it sends `hello` with it,
   receives what it missed (up to the `seq` in `welcome`), and only then resends its whole outbox. Both go in batches
@@ -427,11 +429,14 @@ are two documents.
   snapshot whose count doesn't match its header, a log that starts after the snapshot or ends before it, operations
   that don't rebuild a valid replica. The hello gets `server-error` and the error is logged; other documents are
   served. Serving a document with a part missing would be worse than not serving it.
-- **A snapshot is a list of ordinary operations** (`Rga.snapshot`): every run's insert as it arrived, in the order of
-  the run's first element in the sequence, then deletes of the tombstones. Every element comes after its origin in
-  the sequence, so each insert's origin is placed by an earlier one; applying inserts in any order whose origins come
-  first gives the same sequence (convergence), so a new replica rebuilds exactly this state, and one that holds part
-  of the log merges it. The inserts are the original runs, not the stretches the sequence shows now: a run's middle
+- **A snapshot is a list of ordinary operations** (`Rga.snapshot`): every run's insert as it arrived, in id order
+  (counter, then replica), then deletes of the tombstones. An insert's counter is larger than its origin's, so each
+  insert's origin is placed by an earlier one; applying inserts in any order whose origins come first gives the same
+  sequence (convergence), so a new replica rebuilds exactly this state, and one that holds part of the log merges it.
+  Id order is also the cheap one: nothing with a larger id is placed yet, so each insert's scan stops just after its
+  origin. The first version used sequence order, valid too, but a tombstone typed early sits after everything typed
+  after it at the same spot, and placing it scanned past all of that (loading from such a snapshot took 2,350 ms where
+  the log took 467; id order: 344). The inserts are the original runs, not the stretches the sequence shows now: a run's middle
   sent as a run of its own would be a conflict with the replica that has the whole run.
 - **Every 10,000 entries** (`snapshotEvery`) the hub writes a snapshot (to a temporary file, fsynced, renamed into
   place, the directory fsynced), starts a new segment, and deletes the older snapshots and the segments holding only

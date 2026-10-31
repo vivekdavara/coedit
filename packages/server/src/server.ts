@@ -65,8 +65,9 @@ export interface SyncServer {
   /** Open sync connections. */
   readonly connections: number;
   /**
-   * A document's log length, text and replica state (Rga.state), or undefined if no one has joined it (a hello
-   * refused for it doesn't count).
+   * A document's log length, text and replica state (Rga.state), or undefined if it isn't loaded: no one has joined
+   * it (a hello refused for it doesn't count), or, with a data directory, it was unloaded as idle or dropped after a
+   * failed write (the next join loads it again).
    */
   inspect(doc: string): { seq: number; text: string; state: string } | undefined;
   /** Stops listening and closes every connection; resolves once the server is closed. */
@@ -336,7 +337,8 @@ class Sync {
             else this.#release(message.doc, hub);
             return;
           }
-          // Kept from the first join on: a hello refused for a document with no log (ahead-of-server) leaves none.
+          // Kept from the first join on: a hello refused for a document with no log (ahead-of-server) leaves no hub. With a
+          // data directory it does leave the document's directory and an empty first segment on disk.
           this.#hubs.set(message.doc, hub);
           joined = { hub, member };
           return;

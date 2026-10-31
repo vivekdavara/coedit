@@ -11,7 +11,9 @@
  *   with it, applies what it missed (up to the `seq` in `welcome`), and only then sends its outbox, all of it, in
  *   batches: whatever was echoed by then has left the outbox, so what is resent is what the server hadn't logged
  *   when this client joined. An insert the server already had (sent just before a connection dropped) is
- *   recognized and not logged twice; a delete is logged again, which changes nothing anywhere.
+ *   recognized and not logged twice; a delete is logged again, which changes nothing anywhere. A client too far
+ *   behind gets a snapshot instead of the log (day 4): what the snapshot holds leaves the outbox unsent, including
+ *   a delete the server never logged whose ids someone else had already deleted (it would change nothing).
  * - **Errors.** A connection that closes is retried with exponential backoff and jitter. An `error` message other
  *   than `server-error` means retrying would be refused the same way, so the client stops (status `failed`).
  */

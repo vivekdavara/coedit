@@ -406,10 +406,12 @@ back exactly (a bad line in the middle, a gap in the numbers, a snapshot short o
 with `server-error` rather than serve it with something missing. `crash.test.ts` kills the server with SIGKILL while
 a client types, three rounds, and checks the restarted log holds every entry the client saw echoed.
 
-**What is a snapshot?** A list of ordinary operations that rebuilds the document: every run's original insert, in the
-order its first element appears in the sequence, then deletes of the tombstones (`Rga.snapshot`). An element always
-comes after its origin, so each insert's origin is placed by an earlier one, and any order with origins first builds
-the same sequence. Because they're just operations, a client that already has part of the document applies a
+**What is a snapshot?** A list of ordinary operations that rebuilds the document: every run's original insert, in id
+order, then deletes of the tombstones (`Rga.snapshot`). An insert's counter is always larger than its origin's, so
+each origin is placed first, and any order with origins first builds the same sequence. Id order is also the fast
+one: nothing larger is placed yet, so each insert stops right after its origin. My first version used sequence order
+and was five times slower to load than the log, because an early tombstone sits after everything typed later at its
+spot and placing it scanned past all of it. Because they're just operations, a client that already has part of the document applies a
 snapshot like anything else: what it has is a duplicate, the rest merges. Runs go whole, not as the stretches the
 sequence shows now, because a run's middle sent as a run of its own would conflict with a replica holding the run.
 
