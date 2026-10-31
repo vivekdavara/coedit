@@ -125,7 +125,7 @@ test('editing measures a session it actually ran: every tenth, both readers conv
   assert.ok(Number(growth[3]) > 50 && Number(growth[3]) < 100, out);
   assert.match(out, /snapshot [\d,]+ bytes \([\d.]+ per visible character, \d+ operations\)/);
   const heap =
-    /heap: a replica rebuilt from the snapshot takes [\d,-]+ bytes, (-?\d+) per element \(same text\)/.exec(
+    /heap: a replica rebuilt from the snapshot takes [\d,-]+ bytes, (-?\d+) per element \(mean of 3 kept at once; same text\)/.exec(
       out,
     );
   assert.ok(heap !== null && Number(heap[1]) > 0, out);

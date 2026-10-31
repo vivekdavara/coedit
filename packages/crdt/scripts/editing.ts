@@ -168,13 +168,23 @@ const gc = (globalThis as { gc?: () => void }).gc;
 if (gc === undefined) {
   console.log('  heap: run with --expose-gc to measure');
 } else {
+  // Three copies kept alive at once, two collections either side: one copy's size is too close to what else a
+  // single collection may or may not free (a first version measured one copy and reported a negative size).
+  const ops = writer.snapshot();
+  gc();
   gc();
   const before = process.memoryUsage().heapUsed;
-  const rebuilt = new Rga('heap');
-  for (const op of writer.snapshot()) rebuilt.apply(op);
+  const copies = [0, 1, 2].map((i) => {
+    const copy = new Rga(`heap${i}`);
+    for (const op of ops) copy.apply(op);
+    return copy;
+  });
+  gc();
   gc();
   const after = process.memoryUsage().heapUsed;
+  const each = (after - before) / copies.length;
+  const same = copies.every((c) => c.length === visible);
   console.log(
-    `  heap: a replica rebuilt from the snapshot takes ${fmt(after - before)} bytes, ${((after - before) / sizes.elements).toFixed(0)} per element (${rebuilt.length === visible ? 'same text' : 'TEXT DIFFERS'})`,
+    `  heap: a replica rebuilt from the snapshot takes ${fmt(Math.round(each))} bytes, ${(each / sizes.elements).toFixed(0)} per element (mean of ${copies.length} kept at once; ${same ? 'same text' : 'TEXT DIFFERS'})`,
   );
 }
