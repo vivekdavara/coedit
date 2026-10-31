@@ -109,6 +109,8 @@ export const ERROR_CODES = [
   'unexpected-message',
   'refused-op',
   'too-large',
+  // The client's `have` is past the end of the server's log: the server lost entries the client applied.
+  'ahead-of-server',
   'server-error',
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
