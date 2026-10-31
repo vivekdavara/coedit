@@ -415,6 +415,18 @@ tombstone spans), each re-run as a mutant and failing; the other two are equival
 already holds; forgetting a partial snapshot on a dropped connection, which the next one replaces). Seven stale
 comments and DESIGN lines were fixed (`3e706d2`).
 
+**Round 2** (one agent at `3e706d2`, only what changed since round 1: its fixes, the blocks, the id-order snapshot;
+about 14 minutes, asked what each change broke) reproduced one defect: **an edit just before a long deleted stretch
+still walked every tombstone**, block by block, since the walk stopped only at the next visible element: 2,000
+keystrokes before 200,000 tombstones took 1,864 ms against 12 ms in a live document. The walk now skips blocks with
+nothing visible and stops at the last element it needs (`5c32784`). No correctness defect in the storage fixes or the
+id-order snapshot: its fuzzers compared the blocks with the single array of `34380fd` over about 480 sessions with
+out-of-order delivery, duplicates and deletes ahead (identical everywhere), and ran 150 store sessions with failing
+deletes, opens and renames and random restarts (every step reopened to the same document). Of its five surviving
+mutants, three now fail tests (`f2fc911`: blocks under out-of-order delivery, the snapshot due point after a reload,
+the old segment's descriptor closed); two only cost speed. It also found pruning stuck for good on a segment file
+already gone (deleted with force now, `f2fc911`) and the docs still describing the single array (fixed).
+
 ## Review of day 3
 
 One review agent at a time, in its own worktree, with a correctness brief listing the day's claims, writing each
@@ -602,8 +614,9 @@ support this machine's Node 23).
 - **One server per data directory.** Nothing locks it: two servers on one directory would interleave appends.
 - **No checksums.** Each stored line is checked as the wire format checks a message, which catches a torn or garbled
   line, not a character changed into another valid one.
-- **A snapshot is written inside the message that reaches the interval** (143 ms at 67,000 characters with fsync),
-  and the client too far behind gets the whole document as operations, which it places at the same O(n) cost.
+- **A snapshot is written inside the message that reaches the interval** (115 ms at 67,000 characters with fsync),
+  and a client too far behind gets the whole document as operations (fast to apply in id order, but all of it, about
+  40 bytes per visible character).
 - **Deletes are still logged every time they arrive**, so a client can grow a document's log by repeating deletes;
   the log now lives on disk, and only the entries since the previous snapshot are kept, but each repeat is an entry.
   Documents without a data directory (the tests') stay in memory for the server's lifetime.

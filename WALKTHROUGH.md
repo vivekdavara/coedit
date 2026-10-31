@@ -446,10 +446,11 @@ and the lower-case letter, which no document name contains.
 ## Measurements (day 4)
 
 **How fast is the CRDT?** `npm run editing -w @coedit/crdt` runs a seeded synthetic session of 100,000 edits (typing,
-backspaces, jumps, selections, pastes). Local edits run at about 21,000 a second in the first tenth and fall to about
-1,460 by 369,000 elements, because every operation scans one array from the start (O(n)). A second replica applying
-all 95,043 operations manages about 3,300 a second, the same from JSON through the strict decoder, so the decoder
-isn't the cost; placement is.
+backspaces, jumps, selections, pastes). With the elements in one array, local edits ran at about 21,000 a second in
+the first tenth and fell to about 1,460 by 369,000 elements, because every operation scanned the array from the start
+(O(n)), and a second replica applying all 95,043 operations managed about 3,300 a second, the same from JSON through
+the strict decoder: placement was the cost, not decoding. With blocks (next answer) it's about 257,000 local edits a
+second at the end and 375,000 operations a second remotely, and then the decoder is about half the cost.
 
 **Was that a problem, and what did you do?** Not for typing: a person makes a few edits a second. It was for big
 documents: loading a document of 100,000 one-character entries took 6 to 7 s, with the server's event loop blocked.

@@ -440,13 +440,15 @@ are two documents.
   Id order is also the cheap one: nothing with a larger id is placed yet, so each insert's scan stops just after its
   origin. The first version used sequence order, valid too, but a tombstone typed early sits after everything typed
   after it at the same spot, and placing it scanned past all of that (loading from such a snapshot took 2,350 ms where
-  the log took 467; id order: 344). The inserts are the original runs, not the stretches the sequence shows now: a run's middle
+  the log took 467; in id order 344, against 481 for the log in the same run). The inserts are the original runs, not the stretches the sequence shows now: a run's middle
   sent as a run of its own would be a conflict with the replica that has the whole run.
 - **Every 10,000 entries** (`snapshotEvery`) the hub writes a snapshot (to a temporary file, fsynced, renamed into
   place, the directory fsynced), starts a new segment, and deletes the older snapshots and the segments holding only
   entries before the previous snapshot. What stays is the newest snapshot and the entries since the one before it,
   on disk and in memory, so a client that missed less than one interval still catches up from the log. A member
-  still catching up keeps the entries it hasn't been sent. A snapshot that fails to write loses nothing (the log has
+  still catching up keeps the entries it hasn't been sent. If a new segment can't be started (the snapshot itself is
+  in place), appends go on in the old one, which is kept whole until a later snapshot starts one; while that keeps
+  failing nothing is pruned, and the log on disk and in memory grows (the failure is logged at every snapshot). A snapshot that fails to write loses nothing (the log has
   every entry); the hub logs it and goes on.
 - **A client too far behind** (its `have` is older than the oldest entry kept, `base`) gets, after `welcome`, the
   document as it is at the join, as `snapshot` messages (each at most 1,000 operations and 1 MiB, the last marked
