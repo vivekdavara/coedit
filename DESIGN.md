@@ -34,7 +34,7 @@ flowchart LR
   out <-- "WebSocket, JSON messages" --> hub
   subgraph server["Sync server (Node, port 8110)"]
     hub["document hub: validate, order, relay"] --> rep2["CRDT replica"]
-    hub --> log["op log + snapshots on disk (day 4)"]
+    hub --> log["op log + snapshots on disk"]
   end
 ```
 
@@ -144,8 +144,11 @@ the `deleteCount` visible elements from `index` and an insert whose origin is th
 the client can patch the textarea and shift the caret instead of re-rendering everything.
 
 The first implementation keeps the elements in one array and finds positions by scanning: O(n) per operation, simple
-and easy to test. Day 4 measures it; if it's too slow at realistic sizes, an order-statistics tree replaces the array
-behind the same interface.
+and easy to test. Day 4 measured it (README "Results (day 4)"): local edits fall from about 50,000 a second at
+11,000 elements to about 1,460 at 369,000, and loading a document of 100,000 one-character entries takes 6 to 7 s,
+since placing each run scans from the start. Fine for typing, too slow for large documents and for loading them; an
+order-statistics tree (or blocks of elements with visible counts) would replace the array behind the same interface.
+It isn't built yet.
 
 ### The interface (day 2)
 
@@ -343,7 +346,8 @@ What it logs:
   over 1 MiB end the connection. Each refusal is an `error` with its code, then close code 1008 (1011 after
   `server-error`); a message over 1 MiB is closed with 1009 without one, since the server stops reading at the limit.
 - A `have` past the end of the server's log is refused with `ahead-of-server`: the server has lost entries the
-  client applied (until day 4 a restart loses everything). The client stops and keeps its text.
+  client applied (without a data directory a restart loses everything; with one, day 4, only losing the data
+  directory does). The client stops and keeps its text.
 - A second connection with the same replica id replaces the first (close code 4001): a client reconnecting before
   the server noticed its old connection drop.
 - **Origins.** A browser lets any page open a WebSocket to any address and sends the page's origin with the
@@ -394,22 +398,106 @@ A `<textarea>`, not `contenteditable`: plain text with a selection API that beha
 - **One origin.** The page opens its socket at `/sync` on its own host; the dev server and `vite preview` pass it on to
   the sync server (`COEDIT_SYNC_TARGET`, default `ws://127.0.0.1:8110`).
 
-## Persistence and tombstones (day 4)
+## Persistence (day 4)
 
-- **Op log and snapshots.** Each document has a directory: `ops.log` (one JSON line per accepted operation, with its
-  sequence number, appended before the operation is relayed) and snapshots (the whole CRDT state with its sequence
-  number). On start the server loads the newest snapshot and replays the log after it; a torn last line from a crash
-  is dropped. A client whose `have` is older than the oldest kept log entry gets the snapshot instead.
-- **Tombstone garbage collection.** Tombstones grow without bound. One can be removed only when no operation that may
-  still arrive names it, and an offline client can return any time with operations naming anything it saw. Day 4
-  collects only what the server can prove: tombstones deleted before every connected replica's `have` and older than
-  a retention window; a client returning after that window with operations that name a collected element is resynced
-  from a snapshot, and its unsent edits are re-applied by position (its text survives, its exact placement may not).
-  A tombstone's character isn't needed at all, only its id, so that much can go immediately.
-- **Measured**: operations per second (local typing, remote integration, a large paste), document size per visible
-  character as edits accumulate, and the tombstone share, over a synthetic editing session and, if its license
-  allows, a published editing trace.
-- **End to end**: Playwright with two browser contexts editing one document at once, offline and back.
+With a data directory (`COEDIT_DATA` for `npm start -w @coedit/server`, default `data` in the server's working
+directory) each document has a directory of its own
+(`packages/server/src/store.ts`):
+
+```text
+log-<first>.jsonl       log entries first, first + 1, ...: one line each, {"seq":n,"op":<the op, canonical>}
+snapshot-<seq>.jsonl    the document after entry seq: a header {"seq":s,"ops":n}, then n operations, one a line
+```
+
+Numbers in names have 16 digits, so names sort as numbers do. Capital letters in a document's name are written as `^`
+and the lower-case letter (`Notes` is `^notes`): macOS's file systems ignore case by default, and `Notes` and `notes`
+are two documents.
+
+- **On disk before anyone sees it.** `submit` applies a message's operations, appends the new entries in one write,
+  fsyncs, and only then relays them. So whatever a client has applied, and whatever it holds as acknowledged, the
+  server has kept: a restart (or a crash) never leaves a client `ahead-of-server`. On macOS Node's fsync is
+  `F_FULLFSYNC`, which waits for the drive: about 3 ms a message, so one server takes about 340 messages a second
+  with it (README "Results (day 4)"). Group commit (one fsync for the messages that arrive during the last) would
+  lift that; it isn't built.
+- **Opening** reads the newest snapshot, then every segment, through the strict JSON reader and the wire format's
+  checks, and rebuilds the replica from the snapshot and the entries after it. Part of a line at the end of the last
+  segment is an append a crash cut off: it's dropped and the file truncated there. Nothing in it was relayed (the
+  relay comes after the append), and its sender still has it in its outbox and resends it. Anything else that
+  doesn't read back exactly refuses the document: a bad line before the end, a gap in the numbers, an extra key, a
+  snapshot whose count doesn't match its header, a log that starts after the snapshot or ends before it, operations
+  that don't rebuild a valid replica. The hello gets `server-error` and the error is logged; other documents are
+  served. Serving a document with a part missing would be worse than not serving it.
+- **A snapshot is a list of ordinary operations** (`Rga.snapshot`): every run's insert as it arrived, in the order of
+  the run's first element in the sequence, then deletes of the tombstones. Every element comes after its origin in
+  the sequence, so each insert's origin is placed by an earlier one; applying inserts in any order whose origins come
+  first gives the same sequence (convergence), so a new replica rebuilds exactly this state, and one that holds part
+  of the log merges it. The inserts are the original runs, not the stretches the sequence shows now: a run's middle
+  sent as a run of its own would be a conflict with the replica that has the whole run.
+- **Every 10,000 entries** (`snapshotEvery`) the hub writes a snapshot (to a temporary file, fsynced, renamed into
+  place, the directory fsynced), starts a new segment, and deletes the older snapshots and the segments holding only
+  entries before the previous snapshot. What stays is the newest snapshot and the entries since the one before it,
+  on disk and in memory, so a client that missed less than one interval still catches up from the log. A member
+  still catching up keeps the entries it hasn't been sent. A snapshot that fails to write loses nothing (the log has
+  every entry); the hub logs it and goes on.
+- **A client too far behind** (its `have` is older than the oldest entry kept, `base`) gets, after `welcome`, the
+  document as it is at the join, as `snapshot` messages (each at most 1,000 operations and 1 MiB, the last marked
+  `last`), then the log from there. The client merges each part into its replica and moves to the snapshot's sequence
+  number only at the last part, so a connection dropped part way asks again from where it was.
+- **The outbox after a snapshot.** The client's unacknowledged operations that the server logged before the snapshot
+  will never be echoed to it (their echoes were in the entries the snapshot replaces). The snapshot holds what the
+  server had logged by its sequence number, so the client drops from its outbox every insert whose run is in the
+  snapshot and every delete all of whose ids are tombstones in it, and sends the rest. An insert in the snapshot
+  was logged, since the server holds only what it logged. A delete whose effect is in the snapshot may not have
+  been logged (another client's delete of the same text), but it needs no echo: it changes nothing anywhere now.
+  Nothing logged after the snapshot can be in it, and nothing of this connection's outbox has been sent yet (the
+  client sends it once caught up), so every operation dropped is one whose echo would never come, and every one kept
+  is still to be logged.
+- **A failed append** (a full disk) leaves the replica holding operations the disk may not hold. The hub closes
+  every member with `server-error` (which clients retry) and refuses everything after; the server drops it, and the
+  next join loads the document from what reached the disk. Nothing of the failed message was relayed, and its sender
+  resends it from its outbox.
+- **Idle documents** (no one connected for 60 s, `idleMs`) are unloaded and loaded again on the next join, so a
+  server no longer holds every document anyone ever opened. Without a data directory (the tests' default) documents
+  live in memory and are never unloaded.
+- **Not handled**: two server processes on one data directory (nothing locks it; one server process is a non-goal),
+  a disk that loses fsynced data, and bit rot inside an entry that still parses (no checksums: every line is checked
+  as the wire format checks a message, which catches a torn or garbled line but not a character changed to another
+  valid one).
+
+## Tombstones (day 4: measured, not collected)
+
+A delete leaves a tombstone, and tombstones grow without bound: in the synthetic 100,000-edit session of
+`npm run editing -w @coedit/crdt` 45% of the elements are tombstones at the end (69% at 20,000 edits), and each
+element takes about 186 bytes of heap. Day 4 was to collect them; it measured them instead, and collecting is not
+built. What collecting needs, worked out on day 4:
+
+- **When removing one changes nothing.** Placement is RGA's skip rule: just after the origin, past every larger id,
+  stop at the first smaller one. A tombstone T that no element names as its origin, and that no operation still to
+  arrive names (as an origin or in a delete), can go: wherever T was the first smaller id an insert stopped at, the
+  element after T has an id smaller still (it's T's next sibling, or comes after T's subtree, whose first element is
+  smaller than every id in it), so the insert stops at the same place. A tombstone whose children are all collected
+  becomes such a leaf in turn. Replicas that keep T and replicas that dropped it then place every future insert the
+  same way, so they needn't collect at the same time.
+- **Knowing nothing still to arrive names it** is the hard part. Only a replica that hadn't applied T's delete when
+  it made an operation can name T, so the server needs to know, for every replica that may still send, that
+  everything it made before applying T's delete has arrived. For connected clients that takes a new message: "I have
+  applied the log up to n", sent after the outbox (the socket keeps order, so whatever the client made before
+  applying entry n arrives first). Clients that are offline can come back at any time with anything; the server
+  can't wait for them forever, so it keeps a retention window (entries or days), collects past it, and a client
+  returning with a `have` older than what was collected must be resynced: its outbox operations that name collected
+  elements are re-anchored (an insert whose origin is gone takes the nearest earlier element the server still has,
+  under the same id, since the server never logged it) or dropped (a delete of something already gone). Its text
+  survives; the exact placement of its offline inserts next to deleted text may not.
+- That is a protocol change (the new message, a `resync` path, the client's re-anchoring) plus the server's
+  bookkeeping of which tombstones are leaves and when each was deleted. It was not built on day 4; persistence and
+  the end-to-end tests were. Until then a tombstone's cost is its element: about 186 bytes of heap and, in a snapshot,
+  its part of the run that carries it.
+
+## End to end (day 4)
+
+`packages/client/e2e/two-browsers.spec.ts` (Playwright, the installed Chrome) runs the sync server and the dev server
+on their own ports and two browser contexts as two people: typing seen both ways with the other's caret, both typing
+at one spot at once (each run whole), one offline while both edit and back, and a document opened after everyone left.
 
 ## Days
 
@@ -418,7 +506,7 @@ A `<textarea>`, not `contenteditable`: plain text with a selection API that beha
 | 1   | this design; workspaces, CI; the wire format and its strict decoder; the network simulator and its self-test; the client's edit mapping |
 | 2   | the CRDT (ids, Lamport clock, insert, delete, tombstones, pending operations); convergence properties                                   |
 | 3   | the sync server and React client; presence; offline buffering and reconnect                                                             |
-| 4   | persistence (snapshots + op log); tombstone GC; Playwright e2e with two browsers; ops/sec, document growth                              |
+| 4   | persistence (snapshots + op log); Playwright e2e with two browsers; ops/sec, document growth (tombstone GC: designed, not built)        |
 | 5   | README with results, WALKTHROUGH.md, v1.0.0                                                                                             |
 
 ## Decisions
@@ -429,8 +517,10 @@ A `<textarea>`, not `contenteditable`: plain text with a selection API that beha
 - **RGA, not YATA (Yjs) or Fugue.** RGA is one ordering rule with a short proof, which matters for a project meant to
   be explained end to end. Its known weakness (backward typing interleaves) is documented above.
 - **Written by hand, not Yjs or Automerge.** Being hand-written is the point of the project.
-- **JSON text messages.** Easy to read in a browser's network panel and to test; a binary encoding would be smaller,
-  and day 4's measurements will say whether it matters.
+- **JSON text messages.** Easy to read in a browser's network panel and to test; a binary encoding would be smaller.
+  Day 4 measured the cost on disk: a snapshot takes about 40 bytes per visible character and the log about 50 in the
+  synthetic session, mostly each operation's JSON around a few characters. Small next to the heap (about 186 bytes
+  an element); not changed.
 - **Node's own test runner and type stripping.** Node runs the TypeScript directly (types are erased, nothing is
   compiled), so the server and the tests need no build step; `tsc` only checks types. That rules out TypeScript-only
   runtime syntax (enums, parameter properties), which `erasableSyntaxOnly` enforces.
