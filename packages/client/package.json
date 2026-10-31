@@ -9,13 +9,15 @@
     "dev": "vite --port 5173 --strictPort",
     "build": "vite build",
     "preview": "vite preview --port 5173 --strictPort",
-    "sync-latency": "node --disable-warning=ExperimentalWarning scripts/sync_latency.ts"
+    "sync-latency": "node --disable-warning=ExperimentalWarning scripts/sync_latency.ts",
+    "e2e": "playwright test"
   },
   "dependencies": {
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },
   "devDependencies": {
+    "@playwright/test": "1.64.1",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",

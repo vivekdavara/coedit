@@ -25,3 +25,19 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
+
+  e2e:
+    # Two browsers editing one document through the real sync server and dev server (packages/client/e2e). It drives
+    # the runner's installed Google Chrome (Playwright's channel 'chrome'), so no browser is downloaded.
+    name: e2e (chrome)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: google-chrome --version
+      - run: npm run e2e -w @coedit/client
