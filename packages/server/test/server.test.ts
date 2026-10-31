@@ -122,6 +122,7 @@ describe('parseOrigins', () => {
       'https://b.test:8443',
     ]);
     assert.deepEqual(parseOrigins('http://[::1]:5173'), ['http://[::1]:5173']);
+    assert.deepEqual(parseOrigins('http://a:65535,http://b:1'), ['http://a:65535', 'http://b:1']);
   });
 
   test('an empty setting allows no page', () => {
@@ -138,6 +139,11 @@ describe('parseOrigins', () => {
       'http://',
       'http://a:0',
       'http://a:05173',
+      'http://a:65536',
+      'http://a:99999',
+      'http://LOCALHOST:5173',
+      'HTTP://localhost:5173',
+      'http://[::A]:5173',
       'http://a,,http://b',
       'http://a b',
       'null',
