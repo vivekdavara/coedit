@@ -814,6 +814,27 @@ describe('collected ids (day 4, DESIGN.md "Tombstones")', () => {
     assert.equal(client.unacknowledged, 1);
   });
 
+  test('re-anchor through a chain of collected origins, by where each would be', () => {
+    const { client, latest } = offline();
+    client.edit(3, 0, 'Z'); // 4@me after c; meanwhile c then b were backspaced (c, then b, leaves) and collected
+    client.start();
+    latest().open();
+    latest().take();
+    latest().receive(welcome(6));
+    latest().receive(collected(['x', 2, 2]));
+    // And y typed "Q" after a (5@y), which RGA puts before where b was: the insert belongs after it.
+    latest().receive(
+      snapshot(6, [{ ...insert(1, 'x', null, 'abc'), text: 'a' }, insert(5, 'y', [1, 'x'], 'Q')]),
+    );
+    const sent = latest()
+      .take()
+      .flatMap((m) => (m.type === 'ops' ? m.ops : []));
+    // Where b would be is after Q (a larger id); Q's counter (5) isn't smaller than Z's (4), so a is the origin, and
+    // RGA then skips Q (larger) and puts Z after it, where it was meant to be.
+    assert.deepEqual(sent, [insert(4, 'me', [1, 'x'], 'Z')]);
+    assert.equal(client.rga.text(), 'aQZ');
+  });
+
   test('drop the collected ids from an unsent delete, and keep the rest of it', () => {
     const { client, latest } = offline();
     client.edit(1, 2, ''); // deletes b and c

@@ -476,18 +476,37 @@ export class SyncClient {
             this.#fail(`the snapshot lacks ${formatId(op.origin)}, which an unsent edit is after`);
             return;
           }
-          if (order === null) {
-            sequence = old.sequence();
-            order = new Map(sequence.map((id, i) => [idKey(id), i]));
-          }
-          let origin: Id | null = null;
-          for (let i = (order.get(idKey(op.origin)) ?? 0) - 1; i >= 0; i--) {
-            const id = sequence[i] as Id;
-            if (id.counter < op.id.counter && fresh.has(id)) {
-              origin = id;
-              break;
+          // Where the collected origin would be in the new replica: placed by RGA's rule after its own origin
+          // (found the same way if that was collected too). Then the insert's own place after it, and the nearest
+          // element at or before that with a smaller counter, which keeps the operation valid (review of day 4's
+          // collection: the nearest element in this client's old view could be before concurrent text it never saw).
+          const chain: Id[] = [];
+          let base: Id | null = op.origin;
+          while (base !== null && !fresh.has(base)) {
+            const of: Id | null | undefined = fresh.isCollected(base)
+              ? old.originOf(base)
+              : undefined;
+            if (of === undefined) {
+              this.#fail(`the snapshot lacks ${formatId(base)}, which an unsent edit is after`);
+              return;
             }
+            chain.push(base);
+            base = of;
           }
+          let at: Id | null = base;
+          for (let k = chain.length - 1; k >= 0; k--)
+            at = fresh.placementOrigin(at, chain[k] as Id);
+          at = fresh.placementOrigin(at, op.id);
+          if (at !== null && at.counter >= op.id.counter) {
+            if (order === null) {
+              sequence = fresh.sequence();
+              order = new Map(sequence.map((id, i) => [idKey(id), i]));
+            }
+            let i = order.get(idKey(at)) ?? 0;
+            while (i >= 0 && (sequence[i] as Id).counter >= op.id.counter) i--;
+            at = i < 0 ? null : (sequence[i] as Id);
+          }
+          const origin = at;
           next = { ...op, origin };
         }
       } else {
