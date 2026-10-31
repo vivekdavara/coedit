@@ -89,6 +89,8 @@ export class DocumentHub {
   #snapshotSeq = 0;
   readonly #store: DocumentStore | null = null;
   readonly #snapshotEvery: number;
+  /** The sequence number at which the next snapshot is written: an interval after the last one, or after a failure. */
+  #snapshotDue = 0;
   /** Set when storing an entry failed: the replica holds operations the disk may not, so the hub must go. */
   #broken = false;
   /** Joined members: each one's cursor, and where its catch-up has got to. */
@@ -142,6 +144,7 @@ export class DocumentHub {
     this.#store = store;
     this.#log = [...loaded.entries];
     this.#base = loaded.first - 1;
+    this.#snapshotDue = this.#snapshotSeq + this.#snapshotEvery;
   }
 
   /** The last sequence number in the log (0 when it's empty). */
@@ -347,18 +350,18 @@ export class DocumentHub {
       for (const [other, state] of this.#members) if (state.next === null) other.send(text);
       next += batch.length;
     }
-    if (this.#store !== null && this.seq - this.#snapshotSeq >= this.#snapshotEvery) {
-      this.#takeSnapshot(this.#store);
-    }
+    if (this.#store !== null && this.seq >= this.#snapshotDue) this.#takeSnapshot(this.#store);
     return refusal;
   }
 
   /**
    * Writes a snapshot after the last entry, and drops the entries before the previous snapshot from disk and from
    * memory, except those a member still catching up hasn't been sent. A snapshot that fails to write loses
-   * nothing (the log has every entry), so the hub goes on.
+   * nothing (the log has every entry), so the hub goes on, and tries again an interval later, not at every message
+   * (review of day 4: a failure that lasted wrote a whole copy of the document per keystroke).
    */
   #takeSnapshot(store: DocumentStore): void {
+    this.#snapshotDue = this.seq + this.#snapshotEvery;
     let keepFrom = this.#snapshotSeq + 1;
     for (const { next } of this.#members.values()) {
       if (next !== null) keepFrom = Math.min(keepFrom, next);

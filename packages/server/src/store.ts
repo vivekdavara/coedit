@@ -180,7 +180,9 @@ export class DocumentStore {
 
   /**
    * Writes a snapshot after the last entry (`ops`: Rga.snapshot's operations as encodeOp writes them), starts a new
-   * segment, and deletes the older snapshots and every segment holding only entries before `keepFrom`.
+   * segment, and deletes the older snapshots and every segment holding only entries before `keepFrom`. Throws if the
+   * snapshot couldn't be written (its temporary file removed) or the new segment couldn't be started (the snapshot is
+   * in place, and appends go on in the segment they were in); a deletion that fails is only logged (#prune).
    */
   snapshot(ops: readonly string[], keepFrom: number): void {
     this.#open();
@@ -189,14 +191,25 @@ export class DocumentStore {
     const tmp = path.join(this.dir, `${name}.tmp`);
     let text = `{"seq":${seq},"ops":${ops.length}}\n`;
     for (const op of ops) text += `${op}\n`;
-    const fd = fs.openSync(tmp, 'w');
     try {
-      writeAll(fd, Buffer.from(text, 'utf8'));
-      if (this.#fsync) fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
+      const fd = fs.openSync(tmp, 'w');
+      try {
+        writeAll(fd, Buffer.from(text, 'utf8'));
+        if (this.#fsync) fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+      fs.renameSync(tmp, path.join(this.dir, name));
+    } catch (error) {
+      // None of it stays: a failure that lasts would otherwise leave a whole copy of the document per attempt
+      // (review of day 4). If even this fails, the next open removes it.
+      try {
+        fs.rmSync(tmp, { force: true });
+      } catch {
+        // (see above)
+      }
+      throw error;
     }
-    fs.renameSync(tmp, path.join(this.dir, name));
     // A new segment for the entries after it, unless the last one is still empty.
     const tail = this.#segments.at(-1) as { first: number; last: number };
     if (tail.last >= tail.first) {
@@ -207,14 +220,32 @@ export class DocumentStore {
       this.#segments.push({ first: seq + 1, last: seq });
     }
     if (this.#fsync) syncDirectory(this.dir);
-    for (const other of fs.readdirSync(this.dir)) {
-      if (SNAPSHOT.test(other) && other < name) fs.rmSync(path.join(this.dir, other));
+    this.#prune(name, keepFrom);
+  }
+
+  /**
+   * Deletes the snapshots older than `name` and the segments holding only entries before `keepFrom`. Only logs a
+   * failure: what it couldn't delete is tried again at the next snapshot, and a segment leaves the list only once
+   * its file is gone. Forgetting one whose file stayed made the document unopenable a few snapshots later, once the
+   * segments after it were deleted and it was followed by a gap (review of day 4).
+   */
+  #prune(name: string, keepFrom: number): void {
+    try {
+      for (const other of fs.readdirSync(this.dir)) {
+        if (SNAPSHOT.test(other) && other < name) fs.rmSync(path.join(this.dir, other));
+      }
+      while (this.#segments.length > 1 && (this.#segments[0] as { last: number }).last < keepFrom) {
+        const old = this.#segments[0] as { first: number };
+        fs.rmSync(path.join(this.dir, `log-${pad(old.first)}.jsonl`));
+        this.#segments.shift();
+      }
+      if (this.#fsync) syncDirectory(this.dir);
+    } catch (error) {
+      console.error(
+        `coedit: deleting old files of ${this.dir} failed; trying again at the next snapshot`,
+        error,
+      );
     }
-    while (this.#segments.length > 1 && (this.#segments[0] as { last: number }).last < keepFrom) {
-      const old = this.#segments.shift() as { first: number };
-      fs.rmSync(path.join(this.dir, `log-${pad(old.first)}.jsonl`));
-    }
-    if (this.#fsync) syncDirectory(this.dir);
   }
 
   close(): void {
