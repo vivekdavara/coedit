@@ -259,3 +259,106 @@ entries. I checked it with a plain Map before changing anything (holding 2^23 + 
 one throws; 2^23 holds through 20 million turns), then lowered the capacity to 2^23 - 1 and churned 8.4 million ids
 through a full deleted-ahead map as a check. The pattern of the day: each round found a bug in the previous round's
 fix, and each time the fix's own claim ("the most a Map holds") was what was wrong.
+
+## Sync (day 3)
+
+**Walk me through one keystroke, from one tab to another.** The textarea's input event: `App.tsx` compares the text
+with `shown` (what the replica held when they last agreed) using `diffText` and the caret, and calls
+`SyncClient.edit(index, deleteCount, text)` in code points. `edit` applies it to the tab's own replica at once (that
+returns the operations), puts them in the outbox and, if online, sends an `ops` message. The server's session decodes
+it strictly and hands it to the document's hub (`packages/server/src/hub.ts`, `submit`), which checks each operation
+(`#check`), applies it to the server's replica, appends its canonical text to the log, and sends one `ops` message
+numbered from the first new entry to every member, the sender included. The other tab's sync client checks the number
+follows the last one it applied, applies the operation to its replica, and reports the visible changes; `App.tsx`
+patches them into the textarea with `applyChanges`, which moves the caret too. The sender's copy is its echo: it
+matches the outbox's first operation, which leaves the outbox.
+
+**Why does the server echo the sender's own operations back?** It's the acknowledgement, and it costs nothing extra:
+the server sends the same numbered message to everyone. In exchange every client sees one log with one numbering, so
+"I have applied up to 41" means the same for all, and a reconnecting client can ask for exactly what it missed.
+
+**How does the client know which echo is which?** The server relays a client's operations in the order it sent them,
+so echoes come back in outbox order and only the outbox's first operation can match the next one. They're compared by
+canonical text (`encodeOp`). Someone else's byte-identical delete (both deleted the same text at once) matches too,
+which is right: its effect is the same, and the client's own copy, logged again, then changes nothing.
+
+**What happens on reconnect?** `hello` with the last sequence number applied; the server sends `welcome` with where
+its log ends, then everything after `have`. Only when the client has applied up to that point does it resend its
+outbox (in batches of 1,000 operations and 1 MiB), then its cursor. Anything echoed meanwhile has left the outbox, so
+the resend is what the server didn't have when the client joined. An insert the server does have (it arrived just
+before the connection dropped and was logged after the new `welcome`) is recognized by the server's replica and not
+logged twice; its first copy's echo reaches the client while it's still in the outbox.
+
+**Why is a delete logged every time, even a repeat?** The sender waits for an echo of each operation. Two clients can
+make byte-identical deletes, and each needs its echo; the server can't tell that from a resend. A repeated delete
+changes nothing anywhere, so logging it costs a log entry, not correctness.
+
+**Why does the server refuse operations whose dependencies it lacks, when the CRDT can hold them?** In this topology an
+honest client only names elements it got from the server or made itself, and sends in order on one socket, so the
+server always has an operation's dependencies. One it lacks means a bug, and holding it would let a waiting operation
+sit in the log forever and every client hold it too. Refusing keeps the server's replica free of waiting operations
+and its log in causal order. The check (`Rga.ready`) walks delete spans run by run: the largest delete the wire format
+allows is 1,000 spans of 10,000 ids, which id by id is 10 million lookups (about 110 ms) and run by run 1,000.
+
+**What's the counter rule, and why can't the clocks run out?** Every replica's clock takes the largest counter it
+receives, so a single insert numbered near 2^53 - 1 would use up everyone's clock. An honest client's counters are at
+most the server's clock (it has seen nothing the server hasn't) plus the elements it has made since, and its capacity
+bounds those. So the server refuses an insert ending more than its capacity past its clock. Each accepted insert then
+moves the clock at most a capacity, makes at least one element, and the server holds at most a capacity of elements:
+the clock stays under capacity squared, about 2^46. `hub.test.ts` runs that with a capacity of 1,000: the largest
+jumps fill the document at clock 10^6, and the next insert is refused because the document is full.
+
+**What happens to the caret when someone else types?** `textarea.ts`: an insert strictly before it shifts it; one
+exactly at it leaves it before the new text. The caret means "after the element before me", and the new text went
+after that element too, so that's where the caret is; and the next character typed there gets a larger id than the
+new text's, so RGA places it first, right at the caret. A delete around the caret pulls it to where the text began.
+The CRDT counts code points and the textarea UTF-16 units, so each change is converted against the text just before
+it. The property test runs remote edits on a real replica and checks the caret ends next to the element it was after.
+
+**Why hold remote changes during an IME composition?** While a composition is open, the browser owns the textarea's
+text and selection; changing them under it breaks the composition in some browsers. So the client holds incoming
+operations (received, not applied), the composition becomes one edit when it ends (found against the text from before
+it, which the replica must still hold), and then the held operations apply.
+
+**How do you draw other people's cursors in a textarea?** A textarea can't. Behind it sits a copy of the text in a div
+laid out the same way (font, padding, wrapping, scrollbar gutter), with the text transparent; the copy is cut at each
+remote caret and selection end, selections are shaded and carets are coloured bars with a label. The textarea's
+background is transparent, so they show through. It scrolls with the textarea. It's an approximation: a browser that
+wraps a div differently from a textarea would draw a caret on the wrong line.
+
+**What stops a random website from reading my documents?** A browser lets any page open a WebSocket to 127.0.0.1, and
+WebSockets aren't covered by CORS. But the browser sends the page's origin with the handshake, so the server refuses
+(HTTP 403) any origin not on its list: by default the client's dev server. A client that isn't a browser sends no
+origin and is let through; it could send any origin it likes anyway, so this protects browser users, not the server.
+
+**What if a client vanishes without closing?** A laptop whose lid closes sends nothing; TCP can take hours to notice.
+The server pings every connection every 30 seconds and drops one that hasn't answered the previous ping, so its
+cursor goes from everyone's screen within a minute. A client that's connected but not reading is dropped once 16 MiB
+is queued for it; it reconnects and catches up from the log, which is what makes dropping it safe.
+
+**What does the client do when the server refuses something?** It depends on the code. `server-error` means the
+server failed, so the client reconnects with backoff (250 ms doubling to 10 s, with jitter, reset at each
+`welcome`). Anything else would be refused again on retry (a malformed message, an operation the server's replica
+refuses, `ahead-of-server`), so the client stops, says why, and keeps the text on screen.
+
+## Testing sync (day 3)
+
+**How do you test sync end to end?** `sync-convergence.test.ts`: fast-check generates schedules for 2 to 4 sync
+clients on the real server: edits at random positions, dropped connections, offline spells and pauses that let
+messages through. After each, everyone comes back online, and once every outbox is empty and every client has the
+whole log, each client's replica state (`Rga.state()`: ids, tombstones, order) must equal the server's, and the text
+that client patched only from the reported changes (what the editor shows) must equal the server's text. It counts
+what the schedules did and fails if they did too little; the first version asked for "up to 40 steps" and made 160
+edits in 60 schedules, since fast-check's size, not the maximum, decides the length.
+
+**And below that?** The hub has its own tests without sockets (`hub.test.ts`); the endpoint is tested over real
+sockets with a small test client (`packages/server/test/client.ts`); the sync client against a scripted socket
+(`sync-unit.test.ts`), where each message can be delivered, held or dropped exactly; and against the real server over
+Node's own WebSocket (`sync.test.ts`).
+
+**What broke while building it?** Three things the tests found. Node's WebSocket (23.11) fires `error` after a refused
+connection and then nothing, staying CONNECTING for good, where browsers also fire `close`; the client only retried on
+close, so a client started before the server waited forever. The server's command line printed "listening" before it
+installed its signal handlers, and under the suite's new load the SIGTERM test hit that window once (the default
+action killed the process); `signal-order.test.ts` checks the order from inside the child, without timing. And the
+editor kept showing "1 edit not yet acknowledged" because an echo changes no text, so nothing re-rendered.
