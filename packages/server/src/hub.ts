@@ -188,7 +188,7 @@ export class DocumentHub {
     for (let i = 0; i < ops.length; i++) {
       const op = ops[i] as Op;
       try {
-        const problem = this.#check(op);
+        const problem = this.#check(op, member);
         if (problem !== null) {
           refusal = refused(i, problem);
           break;
@@ -216,9 +216,15 @@ export class DocumentHub {
     return refusal;
   }
 
-  /** Why the server can't accept `op` now, or null. */
-  #check(op: Op): string | null {
+  /** Why the server can't accept `op` from `member` now, or null. */
+  #check(op: Op, member: Member): string | null {
     const rga = this.#rga;
+    // A replica only makes ids under its own replica id. One inserting under another's could take that replica's
+    // next ids first, and that replica's next edit would then be refused as a conflict, stopping it (review of day
+    // 3). Deletes may name anyone's ids.
+    if (op.type === 'insert' && op.id.replica !== member.replica) {
+      return `it inserts under replica ${op.id.replica}, but this connection is ${member.replica}`;
+    }
     // Applying a delete costs a lookup per id named, and the wire format lets all 1,000 spans name the same 10,000
     // ids: 10 million lookups for one 43 KB operation, and 23 of those in one message kept the server from every
     // other client for about 5 s (review of day 3). No replica writes overlapping spans (Rga.edit's are disjoint).

@@ -262,7 +262,9 @@ export class Rga {
    * Whether `op`'s dependencies are all placed here, so that applying it leaves nothing waiting: an insert's origin
    * (or HEAD), every id a delete names. The server accepts only such operations, so it never holds a waiting one
    * (DESIGN.md "The sync protocol"). A delete's spans are checked run by run, not id by id: a span over a few long
-   * runs costs a few lookups, however many ids it names. Throws ProtocolError for an operation that isn't valid.
+   * runs costs a few lookups, however many ids it names. (Applying it still visits every id; the server refuses
+   * overlapping spans, so that is bounded by the document's size.) Throws ProtocolError for an operation that isn't
+   * valid.
    */
   ready(op: Op): boolean {
     const checked = validateOp(op);

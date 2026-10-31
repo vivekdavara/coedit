@@ -162,6 +162,17 @@ describe('the sync endpoint', () => {
     }
   });
 
+  test('a hello refused as ahead of the server leaves no document behind', async () => {
+    const doc = freshDoc();
+    const client = await TestClient.open(server);
+    client.send({ type: 'hello', protocol: 1, doc, replica: 'a', have: 3 });
+    await client.expectError('ahead-of-server');
+    assert.equal(server.inspect(doc), undefined);
+    const [a] = await TestClient.join(server, doc, 'a');
+    assert.equal(server.inspect(doc)?.seq, 0);
+    a.close();
+  });
+
   test('a second hello is refused', async () => {
     const [a] = await TestClient.join(server, freshDoc(), 'a');
     a.send({ type: 'hello', protocol: 1, doc: 'd', replica: 'a', have: 0 });

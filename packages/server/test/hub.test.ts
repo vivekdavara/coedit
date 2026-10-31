@@ -296,10 +296,9 @@ describe('operations', () => {
   test('refuses a delete whose spans overlap, in any order; adjacent spans and other replicas are fine', () => {
     const hub = new DocumentHub('d');
     const a = joined(hub, 'a');
-    assert.equal(
-      hub.submit(a, [insert(1, 'a', null, 'abcdef'), insert(7, 'b', [6, 'a'], 'xyz')]),
-      null,
-    );
+    const b = joined(hub, 'b');
+    assert.equal(hub.submit(a, [insert(1, 'a', null, 'abcdef')]), null);
+    assert.equal(hub.submit(b, [insert(7, 'b', [6, 'a'], 'xyz')]), null);
     for (const spans of [
       [
         [1, 'a', 2],
@@ -330,6 +329,21 @@ describe('operations', () => {
     assert.equal(hub.text(), 'abcdefxyz');
     assert.equal(hub.submit(a, [del([3, 'a', 2], [1, 'a', 2], [7, 'b', 1], [8, 'b', 1])]), null);
     assert.equal(hub.text(), 'efz');
+  });
+
+  test("refuses an insert under another replica's id; a delete may name anyone's", () => {
+    const hub = new DocumentHub('d');
+    const a = joined(hub, 'a');
+    const b = joined(hub, 'b');
+    assert.equal(hub.submit(b, [insert(1, 'b', null, 'xy')]), null);
+    // a taking b's next id: b's next edit would then be refused as a conflict.
+    assert.deepEqual(hub.submit(a, [insert(3, 'b', [2, 'b'], 'q')]), {
+      code: 'refused-op',
+      message: 'ops[0] refused: it inserts under replica b, but this connection is a',
+    });
+    assert.equal(hub.submit(b, [insert(3, 'b', [2, 'b'], 'z')]), null);
+    assert.equal(hub.submit(a, [del([1, 'b', 1])]), null);
+    assert.equal(hub.text(), 'yz');
   });
 
   test('refuses an insert reusing an id with other content', () => {

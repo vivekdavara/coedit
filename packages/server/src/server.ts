@@ -50,7 +50,10 @@ export interface SyncServer {
   readonly port: number;
   /** Open sync connections. */
   readonly connections: number;
-  /** A document's log length, text and replica state (Rga.state), or undefined if no one has joined it. */
+  /**
+   * A document's log length, text and replica state (Rga.state), or undefined if no one has joined it (a hello
+   * refused for it doesn't count).
+   */
   inspect(doc: string): { seq: number; text: string; state: string } | undefined;
   /** Stops listening and closes every connection; resolves once the server is closed. */
   close(): Promise<void>;
@@ -167,18 +170,18 @@ class Sync {
     this.#wss.close();
   }
 
+  /** The document's hub, or a new one, kept only once someone has joined it (see the hello). */
   #hub(doc: string): DocumentHub {
-    let hub = this.#hubs.get(doc);
-    if (hub === undefined) {
-      hub = new DocumentHub(doc, this.#capacity === undefined ? {} : { capacity: this.#capacity });
-      this.#hubs.set(doc, hub);
-    }
-    return hub;
+    return (
+      this.#hubs.get(doc) ??
+      new DocumentHub(doc, this.#capacity === undefined ? {} : { capacity: this.#capacity })
+    );
   }
 
   /**
    * One connection: `hello` first (within the timeout), then `ops` and `presence`. Anything not as the protocol
-   * says gets an `error` and the connection is closed.
+   * says gets an `error` and the connection is closed, except what ws refuses before the session sees it: a message
+   * over 1 MiB (close code 1009) and a text message that isn't UTF-8 (1007) are closed without one.
    */
   #session(ws: WebSocket): void {
     let joined: { hub: DocumentHub; member: Member } | null = null;
@@ -261,6 +264,8 @@ class Sync {
             fail(refusal.code, refusal.message);
             return;
           }
+          // Kept from the first join on: a hello refused for a document with no log (ahead-of-server) leaves none.
+          this.#hubs.set(message.doc, hub);
           joined = { hub, member };
           return;
         }
