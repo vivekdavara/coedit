@@ -372,7 +372,16 @@ Measured on an Apple M3 (macOS 26.6.2, Node 23.11.0, on AC, awake throughout). A
 - `packages/client/test/sync-unit.test.ts`, "a snapshot" (day 4): merged and reported, in parts, the outbox
   acknowledged by what the snapshot holds (a delete only when all of it is there), each out-of-place snapshot
   stopping the client, a dropped connection mid-snapshot, held during IME composition.
+- `packages/crdt/test/rga-blocks.test.ts` (day 4): the same random three-replica sessions with blocks of 1, 2 and 3
+  elements and with one block that never splits must agree on every operation, change, position, text, state and
+  snapshot; a long document in blocks of 4 with a paste over many blocks.
+- `packages/server/test/store-fsync.test.ts` (day 4, from the review): which files are fsynced and in what order
+  (directories' parents, the first segment, each append, a snapshot's temporary file before its rename, the directory
+  after), and that the hub relays only after the sync.
+- `packages/client/test/sync.test.ts` (day 4 additions): a server restarted on its data directory, and a client far
+  behind rejoining through a snapshot with logged and unsent edits, both against the real server.
 - `packages/client/e2e/two-browsers.spec.ts` (day 4): see Results.
+- `review-d4-*.test.ts` (day 4): the review's findings, each of which failed before its fix.
 - `review1-*.test.ts`, `review2-*.test.ts`: the reviews' findings, each of which failed before its fix.
 
 ## Review of day 4
