@@ -7,8 +7,9 @@
  * larger, stop at the first smaller one. A delete leaves tombstones. Operations may arrive in any order and any
  * number of times: one whose dependencies are missing waits, and a duplicate changes nothing.
  *
- * The elements live in one array in document order, and positions are found by scanning it: O(n) per operation,
- * simple to check. Day 4 measures whether that's fast enough.
+ * The elements live in blocks in document order, each block counting its visible elements, so finding a position
+ * skips whole blocks: about n / B + B steps for B elements a block, not n. Day 4 measured the single array this
+ * replaced at 1,462 local edits a second at 369,000 elements (README "Results (day 4)").
  */
 import { IdMap, compareIds, formatId, sameId } from './ids.ts';
 import {
@@ -51,6 +52,11 @@ export interface RgaOptions {
    * RangeError before anything changes, instead of a Map refusing it halfway. Tests set it small.
    */
   readonly capacity?: number;
+  /**
+   * Elements per block (default 512): a block that grows past twice this is split into blocks of it. Only a speed
+   * setting; tests set it small so blocks split all the time.
+   */
+  readonly blockSize?: number;
 }
 
 /**
@@ -84,6 +90,14 @@ interface Element {
   readonly char: string;
   readonly run: Run;
   deleted: boolean;
+  /** The block holding it; null while it waits for its origin. */
+  block: Block | null;
+}
+
+/** A stretch of the sequence: its elements in order, and how many of them are visible. */
+interface Block {
+  readonly elements: Element[];
+  visible: number;
 }
 
 /** A delete that named ids before their insert arrived: it waits until all `remaining` of them have arrived. */
@@ -96,8 +110,11 @@ interface DeleteWait {
 export class Rga {
   readonly replica: string;
   #clock: number;
-  /** The placed elements, tombstones included, in document order. */
-  readonly #elements: Element[] = [];
+  /** The placed elements, tombstones included, in document order, in blocks. */
+  #blocks: Block[] = [];
+  /** Placed elements, tombstones included. */
+  #placed = 0;
+  readonly #blockSize: number;
   /** Every element this replica holds, placed or waiting. */
   readonly #known = new IdMap<Element>();
   /** Runs waiting for their origin, by the origin's id. */
@@ -125,15 +142,21 @@ export class Rga {
     if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > MAX_CAPACITY) {
       throw new RangeError(`capacity ${capacity} isn't an integer from 1 to 2^23 - 1`);
     }
+    const blockSize = options.blockSize ?? 512;
+    if (!Number.isSafeInteger(blockSize) || blockSize < 1) {
+      throw new RangeError(`block size ${blockSize} isn't a positive integer`);
+    }
     this.replica = replica;
     this.#clock = clock;
     this.#capacity = capacity;
+    this.#blockSize = blockSize;
   }
 
   /** The visible text. */
   text(): string {
     let text = '';
-    for (const e of this.#elements) if (!e.deleted) text += e.char;
+    for (const block of this.#blocks)
+      for (const e of block.elements) if (!e.deleted) text += e.char;
     return text;
   }
 
@@ -179,7 +202,7 @@ export class Rga {
   } {
     return {
       elements: this.#known.size,
-      tombstones: this.#elements.length - this.#length,
+      tombstones: this.#placed - this.#length,
       waitingRuns: this.#waitingRuns,
       deletedAhead: this.#deletedAhead.size,
       waitingDeletes: this.#waitingDeletes.size,
@@ -207,16 +230,22 @@ export class Rga {
     // Checked here too, not only in #insert: the edit's deletes are applied before its inserts.
     this.#makeRoom(chars.length);
 
-    // The origin is the visible element before `index`; the targets are the `deleteCount` from it.
+    // The origin is the visible element before `index`; the targets are the `deleteCount` from it. The walk starts
+    // at the block holding the first of them.
     let origin: Element | null = null;
     const targets: Element[] = [];
-    let visible = 0;
-    for (const e of this.#elements) {
-      if (e.deleted) continue;
-      if (visible >= index + deleteCount) break;
-      if (visible === index - 1) origin = e;
-      else if (visible >= index) targets.push(e);
-      visible++;
+    if (index + deleteCount > 0) {
+      const from = this.#findVisible(Math.max(index - 1, 0));
+      let visible = from.before;
+      walk: for (let b = from.b; b < this.#blocks.length; b++) {
+        for (const e of (this.#blocks[b] as Block).elements) {
+          if (e.deleted) continue;
+          if (visible >= index + deleteCount) break walk;
+          if (visible === index - 1) origin = e;
+          else if (visible >= index) targets.push(e);
+          visible++;
+        }
+      }
     }
 
     const ops: Op[] = [];
@@ -317,6 +346,7 @@ export class Rga {
         char: chars[i] as string,
         run,
         deleted: false,
+        block: null,
       };
       run.elements.push(e);
       this.#known.set(e.id, e);
@@ -357,36 +387,92 @@ export class Rga {
 
   /** RGA's rule: just after the origin, past every larger id. The origin is placed. */
   #place(run: Run): Change | null {
-    const elements = this.#elements;
+    const blocks = this.#blocks;
     const first = run.op.id;
     const origin = run.op.origin === null ? null : (this.#known.get(run.op.origin) as Element);
+    // (b, i): where the scan is, as a block and an index in it; visible: the visible elements before it.
+    let b = 0;
     let i = 0;
     let visible = 0;
     if (origin !== null) {
-      for (;;) {
-        const e = elements[i++] as Element;
-        if (!e.deleted) visible++;
-        if (e === origin) break;
-      }
+      const at = this.#locate(origin);
+      b = at.b;
+      i = at.i + 1;
+      visible = at.before + (origin.deleted ? 0 : 1);
     }
-    for (; i < elements.length; i++) {
-      const e = elements[i] as Element;
+    for (;;) {
+      const block = blocks[b];
+      if (block === undefined) break;
+      const e = block.elements[i];
+      if (e === undefined) {
+        if (b + 1 === blocks.length) break; // the end of the sequence: insert at the end of the last block
+        b++;
+        i = 0;
+        continue;
+      }
       if (compareIds(e.id, first) < 0) break;
       if (!e.deleted) visible++;
+      i++;
+    }
+    let block = blocks[b];
+    if (block === undefined) {
+      block = { elements: [], visible: 0 };
+      blocks.push(block);
     }
     // eslint-disable-next-line no-restricted-syntax -- bounded: a run has at most MAX_INSERT_LENGTH (10,000) elements
-    elements.splice(i, 0, ...run.elements);
+    block.elements.splice(i, 0, ...run.elements);
     run.placed = true;
+    this.#placed += run.elements.length;
     // Elements deleted ahead of their insert are placed as tombstones, so only the rest show.
     let text = '';
     let shown = 0;
     for (const e of run.elements) {
+      e.block = block;
       if (e.deleted) continue;
       text += e.char;
       shown++;
     }
+    block.visible += shown;
     this.#length += shown;
+    if (block.elements.length > 2 * this.#blockSize) this.#split(b);
     return shown === 0 ? null : { type: 'insert', index: visible, text };
+  }
+
+  /** Replaces block `b` by blocks of the block size. */
+  #split(b: number): void {
+    const old = this.#blocks[b] as Block;
+    const parts: Block[] = [];
+    for (let at = 0; at < old.elements.length; at += this.#blockSize) {
+      const part: Block = { elements: old.elements.slice(at, at + this.#blockSize), visible: 0 };
+      for (const e of part.elements) {
+        e.block = part;
+        if (!e.deleted) part.visible++;
+      }
+      parts.push(part);
+    }
+    this.#blocks = this.#blocks.slice(0, b).concat(parts, this.#blocks.slice(b + 1));
+  }
+
+  /** A placed element's block (its index), its index in the block, and the visible elements before it. */
+  #locate(e: Element): { b: number; i: number; before: number } {
+    const block = e.block as Block;
+    const b = this.#blocks.indexOf(block);
+    let before = 0;
+    for (let k = 0; k < b; k++) before += (this.#blocks[k] as Block).visible;
+    const i = block.elements.indexOf(e);
+    for (let k = 0; k < i; k++) if (!(block.elements[k] as Element).deleted) before++;
+    return { b, i, before };
+  }
+
+  /** The block holding visible element `index` (from 0), and the visible elements before that block. */
+  #findVisible(index: number): { b: number; before: number } {
+    let before = 0;
+    let b = 0;
+    while (b < this.#blocks.length - 1 && before + (this.#blocks[b] as Block).visible <= index) {
+      before += (this.#blocks[b] as Block).visible;
+      b++;
+    }
+    return { b, before };
   }
 
   #delete(op: DeleteOp): Change[] {
@@ -430,30 +516,42 @@ export class Rga {
     if (targets.size === 0) return [];
 
     // One pass over the old sequence: each target's visible index, grouped into runs of consecutive indices, each
-    // group's index shifted left by the groups before it (so the changes apply one after another).
+    // group's index shifted left by the groups before it (so the changes apply one after another). Blocks holding
+    // no target are skipped by their visible count.
+    const touched = new Set<Block>();
+    for (const e of targets) touched.add(e.block as Block);
     const changes: Change[] = [];
     let visible = 0;
     let removed = 0;
     let start = 0;
     let count = 0;
     let found = 0;
-    for (const e of this.#elements) {
-      if (e.deleted) continue;
-      if (targets.has(e)) {
-        if (count > 0 && start + count === visible) {
-          count++;
-        } else {
-          if (count > 0) changes.push({ type: 'delete', index: start - removed, count });
-          removed += count;
-          start = visible;
-          count = 1;
-        }
-        if (++found === targets.size) break;
+    walk: for (const block of this.#blocks) {
+      if (!touched.has(block)) {
+        visible += block.visible;
+        continue;
       }
-      visible++;
+      for (const e of block.elements) {
+        if (e.deleted) continue;
+        if (targets.has(e)) {
+          if (count > 0 && start + count === visible) {
+            count++;
+          } else {
+            if (count > 0) changes.push({ type: 'delete', index: start - removed, count });
+            removed += count;
+            start = visible;
+            count = 1;
+          }
+          if (++found === targets.size) break walk;
+        }
+        visible++;
+      }
     }
     changes.push({ type: 'delete', index: start - removed, count });
-    for (const e of targets) e.deleted = true;
+    for (const e of targets) {
+      e.deleted = true;
+      (e.block as Block).visible--;
+    }
     this.#length -= targets.size;
     return changes;
   }
@@ -514,8 +612,9 @@ export class Rga {
       throw new RangeError(`index ${index} is outside 0 to ${this.#length}`);
     }
     if (index === 0) return null;
-    let visible = 0;
-    for (const e of this.#elements) {
+    const { b, before } = this.#findVisible(index - 1);
+    let visible = before;
+    for (const e of (this.#blocks[b] as Block).elements) {
       if (!e.deleted && ++visible === index)
         return { replica: e.id.replica, counter: e.id.counter };
     }
@@ -531,12 +630,8 @@ export class Rga {
     if (id === null) return 0;
     const target = this.#known.get(id);
     if (target?.run.placed !== true) return undefined;
-    let visible = 0;
-    for (const e of this.#elements) {
-      if (!e.deleted) visible++;
-      if (e === target) return visible;
-    }
-    throw new Error(`${formatId(id)} is placed but not in the sequence`);
+    const { before } = this.#locate(target);
+    return before + (target.deleted ? 0 : 1);
   }
 
   /**
@@ -554,12 +649,14 @@ export class Rga {
     const ops: Op[] = [];
     const runs = new Set<Run>();
     const tombstones: Element[] = [];
-    for (const e of this.#elements) {
-      if (!runs.has(e.run)) {
-        runs.add(e.run);
-        ops.push(validateOp(e.run.op));
+    for (const block of this.#blocks) {
+      for (const e of block.elements) {
+        if (!runs.has(e.run)) {
+          runs.add(e.run);
+          ops.push(validateOp(e.run.op));
+        }
+        if (e.deleted) tombstones.push(e);
       }
-      if (e.deleted) tombstones.push(e);
     }
     const spans = spansOf(tombstones);
     for (let i = 0; i < spans.length; i += MAX_SPANS) {
@@ -581,7 +678,7 @@ export class Rga {
     waiting.sort((a, b) => compareIds(a.op.id, b.op.id));
     const runs = waiting.map((run) => run.elements.map(describe).join(' '));
     return [
-      this.#elements.map(describe).join(' '),
+      this.#blocks.flatMap((block) => block.elements.map(describe)).join(' '),
       `waiting ${runs.join(', ')}`,
       `deleted ahead ${this.#deletedAhead.ids().map(formatId).join(' ')}`,
     ].join(' | ');
