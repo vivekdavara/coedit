@@ -11,6 +11,7 @@
 import {
   ConflictError,
   MAX_ERROR_MESSAGE_LENGTH,
+  MAX_SPANS,
   PROTOCOL_VERSION,
   ProtocolError,
   Rga,
@@ -59,6 +60,8 @@ export interface HubOptions {
   readonly store?: StoreOptions & { readonly root: string };
   /** With a store: write a snapshot once this many entries have been logged since the last one (default 10,000). */
   readonly snapshotEvery?: number;
+  /** With a store: collect leaf tombstones at each snapshot (DESIGN.md "Tombstones"; default off until clients rebuild). */
+  readonly collect?: boolean;
 }
 
 interface MemberState {
@@ -70,7 +73,13 @@ interface MemberState {
    * A snapshot it gets before the log (it joined with a `have` older than the log kept): the operations, how many
    * have been sent, and the entry it's the state after. Null once sent, or if it needs none.
    */
-  snapshot: { readonly seq: number; readonly ops: readonly string[]; at: number } | null;
+  snapshot: {
+    readonly seq: number;
+    readonly ops: readonly string[];
+    at: number;
+    /** `collected` messages still to send, before the parts (day 4: the ids the document has collected). */
+    readonly collected: string[];
+  } | null;
 }
 
 /** The server's replica id. It never makes an element, so it never names one. */
@@ -89,6 +98,7 @@ export class DocumentHub {
   #snapshotSeq = 0;
   readonly #store: DocumentStore | null = null;
   readonly #snapshotEvery: number;
+  readonly #collect: boolean;
   /** The sequence number at which the next snapshot is written: an interval after the last one, or after a failure. */
   #snapshotDue = 0;
   /** Set when storing an entry failed: the replica holds operations the disk may not, so the hub must go. */
@@ -108,10 +118,17 @@ export class DocumentHub {
       options.capacity === undefined ? {} : { capacity: options.capacity },
     );
     this.#snapshotEvery = options.snapshotEvery ?? 10_000;
+    this.#collect = options.collect ?? false;
     if (options.store === undefined) return;
     const { store, loaded } = DocumentStore.open(options.store.root, doc, options.store);
     try {
-      const rebuild = (texts: readonly string[], what: string, ready: boolean) => {
+      // stamp(i): the stamp of the i-th operation (Rga.apply), by which collection goes.
+      const rebuild = (
+        texts: readonly string[],
+        what: string,
+        ready: boolean,
+        stamp: (i: number) => number,
+      ) => {
         for (let i = 0; i < texts.length; i++) {
           const op = JSON.parse(texts[i] as string) as Op;
           if (ready && !this.#rga.ready(op)) {
@@ -121,7 +138,7 @@ export class DocumentHub {
             );
           }
           try {
-            this.#rga.apply(op);
+            this.#rga.apply(op, stamp(i));
           } catch (error) {
             throw new StoreError(store.dir, `${what} ${i + 1}: ${(error as Error).message}`);
           }
@@ -129,14 +146,28 @@ export class DocumentHub {
       };
       const snapshot = loaded.snapshot;
       if (snapshot !== null) {
-        rebuild(snapshot.ops, `the snapshot's operation`, false);
+        try {
+          this.#rga.markCollected(snapshot.collected);
+        } catch (error) {
+          throw new StoreError(
+            store.dir,
+            `the snapshot's collected ids: ${(error as Error).message}`,
+          );
+        }
+        // Its tombstones were deleted at or before it: stamped with its sequence number.
+        rebuild(snapshot.ops, `the snapshot's operation`, false, () => snapshot.seq);
         if (this.#rga.pending > 0) {
           throw new StoreError(store.dir, "the snapshot's operations leave some waiting");
         }
         this.#snapshotSeq = snapshot.seq;
       }
-      const skip = this.#snapshotSeq - loaded.first + 1;
-      rebuild(loaded.entries.slice(Math.max(0, skip)), 'log entry after the snapshot', true);
+      const skip = Math.max(0, this.#snapshotSeq - loaded.first + 1);
+      rebuild(
+        loaded.entries.slice(skip),
+        'log entry after the snapshot',
+        true,
+        (i) => loaded.first + skip + i,
+      );
     } catch (error) {
       store.close();
       throw error;
@@ -215,7 +246,12 @@ export class DocumentHub {
         ? {
             cursor: null,
             next: this.seq + 1,
-            snapshot: { seq: this.seq, ops: this.#rga.snapshot().map(encodeOp), at: 0 },
+            snapshot: {
+              seq: this.seq,
+              ops: this.#rga.snapshot().map(encodeOp),
+              at: 0,
+              collected: collectedMessages(this.#rga.collectedSpans()),
+            },
           }
         : { cursor: null, next: have + 1, snapshot: null };
     this.#members.set(member, state);
@@ -237,7 +273,9 @@ export class DocumentHub {
       let text: string;
       const snapshot = state.snapshot;
       const next = state.next as number;
-      if (snapshot !== null) {
+      if (snapshot !== null && snapshot.collected.length > 0) {
+        text = snapshot.collected.shift() as string;
+      } else if (snapshot !== null) {
         const end = batchEnd(snapshot.ops, snapshot.at);
         const last = end === snapshot.ops.length;
         text = encodeServerSnapshot(snapshot.seq, snapshot.ops.slice(snapshot.at, end), last);
@@ -305,6 +343,12 @@ export class DocumentHub {
     for (let i = 0; i < ops.length; i++) {
       const op = ops[i] as Op;
       try {
+        // An element collected since its sender saw it (DESIGN.md "Tombstones"): the sender rebuilds from a snapshot
+        // and sends its edits again. Refusing it for good would stop an honest client that was offline a while.
+        if (this.#rga.namesCollected(op)) {
+          refusal = refused(i, 'it names an element this document has collected', 'resync');
+          break;
+        }
         const problem = this.#check(op, member);
         if (problem !== null) {
           refusal = refused(i, problem);
@@ -322,7 +366,8 @@ export class DocumentHub {
           }
         }
         const duplicate = op.type === 'insert' && this.#rga.has(op.id);
-        this.#rga.apply(op);
+        // Stamped with the entry it becomes (a delete always becomes one), for collection.
+        this.#rga.apply(op, this.seq + 1);
         if (!duplicate) this.#log.push(encodeOp(op));
       } catch (error) {
         // RangeError: the document is full (the replica's capacity). ProtocolError only for operations that didn't
@@ -367,7 +412,10 @@ export class DocumentHub {
       if (next !== null) keepFrom = Math.min(keepFrom, next);
     }
     try {
-      store.snapshot(this.#rga.snapshot().map(encodeOp), keepFrom);
+      // Tombstones whose last delete is in an entry this snapshot lets go of: every client that will catch up from
+      // the log has applied it, and one further behind gets a snapshot (DESIGN.md "Tombstones").
+      if (this.#collect) this.#rga.collect(keepFrom - 1);
+      store.snapshot(this.#rga.snapshot().map(encodeOp), keepFrom, this.#rga.collectedSpans());
     } catch (error) {
       console.error(`coedit: writing a snapshot of ${this.doc} failed`, error);
       return;
@@ -460,6 +508,15 @@ function overlapping(spans: readonly Span[]): boolean {
       return true;
   }
   return false;
+}
+
+/** `collected` messages for `spans`, at most MAX_SPANS spans each. */
+function collectedMessages(spans: readonly Span[]): string[] {
+  const messages: string[] = [];
+  for (let i = 0; i < spans.length; i += MAX_SPANS) {
+    messages.push(encodeServerMessage({ type: 'collected', spans: spans.slice(i, i + MAX_SPANS) }));
+  }
+  return messages;
 }
 
 function failed(): Refusal {

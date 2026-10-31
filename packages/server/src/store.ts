@@ -3,8 +3,9 @@
  * directory per document.
  *
  *   log-<first>.jsonl       log entries first, first + 1, ...: one line each, {"seq":n,"op":<the op>}
- *   snapshot-<seq>.jsonl    the operations that rebuild the document after entry seq (Rga.snapshot): a header line
- *                           {"seq":s,"ops":n}, then the n operations, one per line
+ *   snapshot-<seq>.jsonl    the document after entry seq: a header line {"seq":s,"ops":n,"collected":m}, then the n
+ *                           operations that rebuild it (Rga.snapshot), one a line, then the m spans of ids it has
+ *                           collected (Rga.collectedSpans), one a line (a header without "collected" has none)
  *
  * Numbers in names have 16 digits, so names sort as their numbers do. Entries are appended (and fsynced, by default)
  * before the hub relays them, so an operation anyone has seen is on disk. A crash in the middle of an append leaves
@@ -20,7 +21,15 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { JsonError, ProtocolError, encodeOp, parseJson, validateOp } from '@coedit/crdt';
+import {
+  JsonError,
+  MAX_SPAN_LENGTH,
+  ProtocolError,
+  encodeOp,
+  parseJson,
+  validateOp,
+  type Span,
+} from '@coedit/crdt';
 
 export interface StoreOptions {
   /**
@@ -33,7 +42,11 @@ export interface StoreOptions {
 /** What a document's directory held when it was opened. */
 export interface Loaded {
   /** The newest snapshot, or null: the log entry it's the state after, and its operations as encodeOp writes them. */
-  readonly snapshot: { readonly seq: number; readonly ops: readonly string[] } | null;
+  readonly snapshot: {
+    readonly seq: number;
+    readonly ops: readonly string[];
+    readonly collected: readonly Span[];
+  } | null;
   /** The sequence number of `entries[0]` (or of the next entry, when there are none). */
   readonly first: number;
   /** The log entries kept, as encodeOp writes them: from the previous snapshot on. */
@@ -199,13 +212,16 @@ export class DocumentStore {
    * the snapshot couldn't be written (its temporary file is removed); a new segment that can't be started or a
    * deletion that fails is logged, and tried again at the next snapshot.
    */
-  snapshot(ops: readonly string[], keepFrom: number): void {
+  snapshot(ops: readonly string[], keepFrom: number, collected: readonly Span[] = []): void {
     this.#open();
     const seq = this.#last;
     const name = `snapshot-${pad(seq)}.jsonl`;
     const tmp = path.join(this.dir, `${name}.tmp`);
-    let text = `{"seq":${seq},"ops":${ops.length}}\n`;
+    let text = `{"seq":${seq},"ops":${ops.length},"collected":${collected.length}}\n`;
     for (const op of ops) text += `${op}\n`;
+    for (const { replica, counter, length } of collected) {
+      text += `${JSON.stringify({ replica, counter, length })}\n`;
+    }
     try {
       const fd = fs.openSync(tmp, 'w');
       try {
@@ -370,26 +386,54 @@ function readSegment(
   return { entries, torn: read.rest, bytes: read.bytes };
 }
 
-function readSnapshot(file: string): { seq: number; ops: string[] } {
+function readSnapshot(file: string): { seq: number; ops: string[]; collected: Span[] } {
   const read = lines(file);
   if (read.rest > 0) throw new StoreError(file, 'ends with an unfinished line');
   const [header, ...rest] = read.lines;
   if (header === undefined) throw new StoreError(file, 'empty');
   const value = parseLine(file, 1, header);
+  const keys = typeof value === 'object' && value !== null ? Object.keys(value).sort().join() : '';
   const ok =
-    typeof value === 'object' &&
-    value !== null &&
     !Array.isArray(value) &&
-    Object.keys(value).length === 2 &&
+    (keys === 'ops,seq' || keys === 'collected,ops,seq') &&
     Number.isSafeInteger((value as { seq?: unknown }).seq) &&
-    Number.isSafeInteger((value as { ops?: unknown }).ops);
-  if (!ok) throw new StoreError(file, 'line 1: not {"seq":n,"ops":n}');
-  const { seq, ops: count } = value as { seq: number; ops: number };
+    Number.isSafeInteger((value as { ops?: unknown }).ops) &&
+    Number.isSafeInteger((value as { collected?: unknown }).collected ?? 0);
+  if (!ok) throw new StoreError(file, 'line 1: not {"seq":n,"ops":n,"collected":n}');
+  const {
+    seq,
+    ops: count,
+    collected: spans = 0,
+  } = value as { seq: number; ops: number; collected?: number };
   const name = Number((SNAPSHOT.exec(path.basename(file)) as RegExpExecArray)[1]);
   if (seq !== name)
     throw new StoreError(file, `holds the snapshot after entry ${seq}, not ${name}`);
-  if (rest.length !== count) {
-    throw new StoreError(file, `holds ${rest.length} operations, but its header says ${count}`);
+  if (rest.length !== count + spans) {
+    throw new StoreError(
+      file,
+      `holds ${rest.length} lines after its header, but it says ${count} operations and ${spans} collected spans`,
+    );
   }
-  return { seq, ops: rest.map((line, i) => checkedOp(file, i + 2, parseLine(file, i + 2, line))) };
+  const ops = rest
+    .slice(0, count)
+    .map((line, i) => checkedOp(file, i + 2, parseLine(file, i + 2, line)));
+  const collected = rest.slice(count).map((line, i) => {
+    const n = count + i + 2;
+    const v = parseLine(file, n, line) as {
+      replica?: unknown;
+      counter?: unknown;
+      length?: unknown;
+    };
+    // Checked as the wire format checks a delete's span.
+    try {
+      const op = validateOp({ type: 'delete', spans: [v] });
+      if (op.type !== 'delete' || (op.spans[0] as Span).length > MAX_SPAN_LENGTH)
+        throw new Error('');
+      return op.spans[0] as Span;
+    } catch (error) {
+      if (error instanceof ProtocolError) throw new StoreError(file, `line ${n}: ${error.message}`);
+      throw error;
+    }
+  });
+  return { seq, ops, collected };
 }

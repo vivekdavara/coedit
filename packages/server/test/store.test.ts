@@ -267,7 +267,7 @@ describe('snapshots', () => {
 
     const { store: again, loaded } = open(root);
     again.close();
-    assert.deepEqual(loaded.snapshot, { seq: 8, ops: entries(1, 8) });
+    assert.deepEqual(loaded.snapshot, { seq: 8, ops: entries(1, 8), collected: [] });
     assert.equal(loaded.first, 6);
     assert.deepEqual(loaded.entries, entries(6, 4));
   });
@@ -289,7 +289,47 @@ describe('snapshots', () => {
     store.close();
     const { store: again, loaded } = open(root);
     again.close();
-    assert.deepEqual(loaded, { snapshot: { seq: 0, ops: [] }, first: 1, entries: [], torn: 0 });
+    assert.deepEqual(loaded, {
+      snapshot: { seq: 0, ops: [], collected: [] },
+      first: 1,
+      entries: [],
+      torn: 0,
+    });
+  });
+
+  test('keep the collected spans, and read a header without them as none (day 4 tombstones)', (t) => {
+    const root = tempDir(t);
+    const { store } = open(root);
+    store.append(1, entries(1, 2));
+    const collected = [
+      { replica: 'a', counter: 7, length: 2 },
+      { replica: 'b', counter: 1, length: 10_000 },
+    ];
+    store.snapshot(entries(1, 2), 1, collected);
+    store.close();
+    const file = path.join(root, 'doc', snapshotFile(2));
+    assert.match(fs.readFileSync(file, 'utf8'), /^\{"seq":2,"ops":2,"collected":2\}\n/);
+    const reopened = open(root);
+    reopened.store.close();
+    assert.deepEqual(reopened.loaded.snapshot?.collected, collected);
+    // The format before collection: two keys, nothing after the operations.
+    const lines = fs.readFileSync(file, 'utf8').split('\n');
+    fs.writeFileSync(file, ['{"seq":2,"ops":2}', lines[1], lines[2], ''].join('\n'));
+    const old = open(root);
+    old.store.close();
+    assert.deepEqual(old.loaded.snapshot?.collected, []);
+    // A span the wire format refuses.
+    fs.writeFileSync(
+      file,
+      [
+        '{"seq":2,"ops":2,"collected":1}',
+        lines[1],
+        lines[2],
+        '{"replica":"a","counter":0,"length":1}',
+        '',
+      ].join('\n'),
+    );
+    assert.throws(() => open(root), /line 4/);
   });
 
   test('a snapshot that does not read back, or a log that ends before it, is refused', (t) => {
@@ -301,7 +341,14 @@ describe('snapshots', () => {
     const file = path.join(root, 'doc', snapshotFile(3));
     const good = fs.readFileSync(file, 'utf8');
     for (const [bad, problem] of [
-      [good.replace('"ops":3', '"ops":4'), /holds 3 operations, but its header says 4/],
+      [
+        good.replace('"ops":3', '"ops":4'),
+        /holds 3 lines after its header, but it says 4 operations/,
+      ],
+      [
+        good.replace('"collected":0', '"collected":1'),
+        /it says 3 operations and 1 collected spans/,
+      ],
       [good.replace('{"seq":3,', '{"seq":2,'), /after entry 2, not 3/],
       [good.slice(0, -1), /unfinished line/],
       [good.replace('"counter":2}', '"counter":0}'), /line 3/],
