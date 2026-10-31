@@ -103,7 +103,7 @@ export class SyncClient {
   /** The last log sequence number applied. */
   #seq = 0;
   /** Local operations the server hasn't echoed yet, oldest first. */
-  readonly #outbox: Outgoing[] = [];
+  #outbox: Outgoing[] = [];
   #socket: SocketLike | null = null;
   /** The log's end when the current connection joined; null until `welcome`. */
   #target: number | null = null;
@@ -115,8 +115,13 @@ export class SyncClient {
   /** This client's selection as ids (what it last sent or will send), and everyone else's. */
   #cursor: Cursor | null = null;
   readonly #remote = new Map<string, Cursor>();
-  /** While hold() is on: `ops` messages received and not yet applied. */
-  #held: (ServerMessage & { type: 'ops' })[] | null = null;
+  /** While hold() is on: `ops` and `snapshot` messages received and not yet applied. */
+  #held: (ServerMessage & { type: 'ops' | 'snapshot' })[] | null = null;
+  /**
+   * A snapshot being received: the first id of each insert in it, and its tombstones' spans by replica. At its last
+   * part they say which outbox operations the server had logged (see the 'snapshot' case).
+   */
+  #snapshot: { inserts: Set<string>; tombstones: Map<string, [number, number][]> } | null = null;
 
   constructor(options: SyncOptions, events: SyncEvents = {}) {
     this.doc = options.doc;
@@ -339,6 +344,65 @@ export class SyncClient {
         this.#events.onProgress?.();
         return;
       }
+      case 'snapshot': {
+        if (this.#held !== null) {
+          this.#held.push(message);
+          return;
+        }
+        // Only during a catch-up, of the document as it was at most when this connection joined.
+        if (
+          this.#target === null ||
+          this.#live ||
+          message.seq < this.#seq ||
+          message.seq > this.#target
+        ) {
+          this.#fail(`a snapshot after entry ${message.seq}, with ${this.#seq} applied`);
+          return;
+        }
+        const snapshot = (this.#snapshot ??= {
+          inserts: new Set<string>(),
+          tombstones: new Map<string, [number, number][]>(),
+        });
+        const changes: Change[] = [];
+        for (const op of message.ops) {
+          if (op.type === 'insert') snapshot.inserts.add(idKey(op.id));
+          else {
+            for (const span of op.spans) {
+              const list = snapshot.tombstones.get(span.replica);
+              const range: [number, number] = [span.counter, span.counter + span.length - 1];
+              if (list === undefined) snapshot.tombstones.set(span.replica, [range]);
+              else list.push(range);
+            }
+          }
+          try {
+            for (const change of this.rga.apply(op)) changes.push(change);
+          } catch (error) {
+            if (!(error instanceof ConflictError || error instanceof RangeError)) throw error;
+            this.#fail(`this replica refuses the snapshot: ${error.message}`);
+            if (changes.length > 0) this.#events.onChanges?.(changes);
+            return;
+          }
+        }
+        if (changes.length > 0) this.#events.onChanges?.(changes);
+        if (!message.last) return;
+        // The snapshot holds everything the server had logged by `seq`. Outbox operations it holds were logged, and
+        // their echoes were in the entries a snapshot replaces, so they would never come: they're acknowledged. A
+        // delete it holds the effect of needs no echo either (another client's identical delete counts already).
+        this.#snapshot = null;
+        this.#seq = message.seq;
+        const ranges = merged(snapshot.tombstones);
+        this.#outbox = this.#outbox.filter(({ op }) =>
+          op.type === 'insert'
+            ? !snapshot.inserts.has(idKey(op.id))
+            : !op.spans.every((span) =>
+                covers(ranges.get(span.replica), span.counter, span.length),
+              ),
+        );
+        if (this.#seq >= this.#target) this.#goLive();
+        if (this.#remote.size > 0) this.#events.onPresence?.();
+        this.#events.onProgress?.();
+        return;
+      }
       case 'presence': {
         if (message.replica === this.replica) return;
         if (message.cursor === null) this.#remote.delete(message.replica);
@@ -393,6 +457,9 @@ export class SyncClient {
     this.#socket = null;
     this.#target = null;
     this.#live = false;
+    // A snapshot cut off part way: what of it was applied stays (operations merge), and the next connection sends
+    // a whole one again.
+    this.#snapshot = null;
     // Entries held from this connection come again on the next (its hello asks from the last one applied).
     if (this.#held !== null) this.#held = [];
     if (this.#remote.size > 0) {
@@ -446,3 +513,36 @@ export function randomReplica(): string {
 }
 
 export type { Change, Cursor, Id };
+
+const idKey = (id: { replica: string; counter: number }) => `${id.counter}@${id.replica}`;
+
+/** Each replica's ranges sorted and merged where they touch or overlap. */
+function merged(tombstones: Map<string, [number, number][]>): Map<string, [number, number][]> {
+  const out = new Map<string, [number, number][]>();
+  for (const [replica, ranges] of tombstones) {
+    ranges.sort((a, b) => a[0] - b[0]);
+    const list: [number, number][] = [];
+    for (const [start, end] of ranges) {
+      const last = list.at(-1);
+      if (last !== undefined && start <= last[1] + 1) last[1] = Math.max(last[1], end);
+      else list.push([start, end]);
+    }
+    out.set(replica, list);
+  }
+  return out;
+}
+
+/** Whether merged `ranges` hold every counter from `counter` to `counter + length - 1`. */
+function covers(ranges: [number, number][] | undefined, counter: number, length: number): boolean {
+  if (ranges === undefined) return false;
+  let lo = 0;
+  let hi = ranges.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const [start, end] = ranges[mid] as [number, number];
+    if (counter < start) hi = mid - 1;
+    else if (counter > end) lo = mid + 1;
+    else return counter + length - 1 <= end;
+  }
+  return false;
+}

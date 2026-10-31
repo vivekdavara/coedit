@@ -575,3 +575,161 @@ describe('randomReplica', () => {
     assert.equal(ids.size, 1_000);
   });
 });
+
+describe('a snapshot', () => {
+  const snapshot = (seq: number, ops: Op[], last = true): ServerMessage => ({
+    type: 'snapshot',
+    seq,
+    ops,
+    last,
+  });
+  const del = (counter: number, replica: string, length: number): Op => ({
+    type: 'delete',
+    spans: [{ replica, counter, length }],
+  });
+
+  test('merges into the replica, reports the changes, and puts the client at its sequence number', () => {
+    const changes: unknown[][] = [];
+    const { client, latest } = setup({ changes });
+    client.start();
+    latest().open();
+    latest().take();
+    latest().receive(welcome(7));
+    latest().receive(snapshot(7, [insert(1, 'x', null, 'abc'), del(2, 'x', 1)]));
+    assert.equal(client.rga.text(), 'ac');
+    assert.equal(client.seq, 7);
+    assert.equal(client.status, 'online');
+    assert.deepEqual(changes, [
+      [
+        { type: 'insert', index: 0, text: 'abc' },
+        { type: 'delete', index: 1, count: 1 },
+      ],
+    ]);
+    latest().receive({ type: 'ops', from: 8, ops: [insert(4, 'x', [3, 'x'], 'd')] });
+    assert.equal(client.rga.text(), 'acd');
+  });
+
+  test('in parts: the sequence number moves, and the client goes online, only at the last', () => {
+    const { client, latest } = setup();
+    client.start();
+    latest().open();
+    latest().take();
+    latest().receive(welcome(3));
+    latest().receive(snapshot(3, [insert(1, 'x', null, 'ab')], false));
+    assert.equal(client.seq, 0);
+    assert.equal(client.status, 'syncing');
+    assert.equal(client.rga.text(), 'ab');
+    latest().receive(snapshot(3, [], true));
+    assert.equal(client.seq, 3);
+    assert.equal(client.status, 'online');
+  });
+
+  test('acknowledges the outbox operations it holds, and sends the rest', () => {
+    const { client, latest } = setup();
+    client.start();
+    client.edit(0, 0, 'hi'); // logged by the server before this client lost its connection
+    client.edit(2, 0, '!'); // never reached the server
+    client.edit(0, 1, ''); // a delete the snapshot holds the effect of
+    assert.equal(client.unacknowledged, 3);
+    const [hi, bang, gone] = [
+      insert(1, 'me', null, 'hi'),
+      insert(3, 'me', [2, 'me'], '!'),
+      del(1, 'me', 1),
+    ];
+    latest().open();
+    latest().take();
+    latest().receive(welcome(9));
+    latest().receive(snapshot(9, [hi, gone]));
+    assert.equal(client.status, 'online');
+    const sent = latest()
+      .take()
+      .flatMap((m) => (m.type === 'ops' ? m.ops : []));
+    assert.deepEqual(sent, [bang]);
+    assert.equal(client.unacknowledged, 1);
+    assert.equal(client.rga.text(), 'i!');
+    // Its echo still leaves the outbox.
+    latest().receive({ type: 'ops', from: 10, ops: [bang] });
+    assert.equal(client.unacknowledged, 0);
+  });
+
+  test("a delete the snapshot holds only part of the effect of isn't acknowledged", () => {
+    const { client, latest } = setup();
+    client.start();
+    latest().open();
+    latest().take();
+    latest().receive(welcome(1));
+    latest().receive({ type: 'ops', from: 1, ops: [insert(1, 'x', null, 'abcd')] });
+    client.stop();
+    client.edit(0, 3, ''); // deletes 1..3 of x
+    client.start();
+    latest().open();
+    latest().take();
+    latest().receive(welcome(5));
+    // Someone else deleted 2..3 (and 4) meanwhile; 1 is still there on the server.
+    latest().receive(snapshot(5, [insert(1, 'x', null, 'abcd'), del(2, 'x', 3)]));
+    assert.equal(client.unacknowledged, 1);
+    const sent = latest()
+      .take()
+      .flatMap((m) => (m.type === 'ops' ? m.ops : []));
+    assert.deepEqual(sent, [del(1, 'x', 3)]);
+    assert.equal(client.rga.text(), '');
+  });
+
+  for (const [what, steps] of [
+    ['while live', [welcome(0), snapshot(0, [])]],
+    ['before the welcome', [snapshot(0, [])]],
+    [
+      'after a later entry than it',
+      [
+        welcome(2),
+        { type: 'ops', from: 1, ops: [insert(1, 'x', null, 'a'), insert(2, 'x', [1, 'x'], 'b')] },
+        snapshot(1, []),
+      ],
+    ],
+    ['of a later document than the welcome', [welcome(2), snapshot(3, [])]],
+  ] as const) {
+    test(`${what} is a server bug: the client stops`, () => {
+      const { client, latest } = setup();
+      client.start();
+      latest().open();
+      latest().take();
+      for (const step of steps) latest().receive(step);
+      assert.equal(client.status, 'failed');
+      assert.match(client.detail, /a snapshot after entry/);
+    });
+  }
+
+  test('cut off by a dropped connection: the next hello asks from the last entry applied before it', async () => {
+    const { client, latest, sockets } = setup();
+    client.start();
+    latest().open();
+    latest().take();
+    latest().receive(welcome(4));
+    latest().receive(snapshot(4, [insert(1, 'x', null, 'ab')], false));
+    latest().drop();
+    await nextTick();
+    assert.equal(sockets.length, 2);
+    latest().open();
+    assert.deepEqual(latest().take(), [
+      { type: 'hello', protocol: 1, doc: 'd', replica: 'me', have: 0 },
+    ]);
+    latest().receive(welcome(4));
+    latest().receive(snapshot(4, [insert(1, 'x', null, 'ab'), insert(3, 'x', [2, 'x'], 'c')]));
+    assert.equal(client.rga.text(), 'abc');
+    assert.equal(client.seq, 4);
+  });
+
+  test('is held with the log entries while hold() is on, and applied at release()', () => {
+    const { client, latest } = setup();
+    client.start();
+    latest().open();
+    latest().take();
+    client.hold();
+    latest().receive(welcome(2));
+    latest().receive(snapshot(2, [insert(1, 'x', null, 'ab')]));
+    assert.equal(client.rga.text(), '');
+    client.release();
+    assert.equal(client.rga.text(), 'ab');
+    assert.equal(client.status, 'online');
+  });
+});
