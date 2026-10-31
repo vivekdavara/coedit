@@ -320,6 +320,10 @@ logged and relayed. It refuses:
   spans name the same 10,000 ids: one 1 MiB message of such deletes kept the server from every other client for
   about 5 s (review of day 3). No replica writes overlapping spans (`Rga.edit`'s are disjoint), and without overlaps
   every id named is a distinct element the server holds, so a delete's cost is bounded by the document's size.
+- **A message whose deletes together name more ids than the document holds.** A client deletes each element once,
+  so an honest message never does; without this, 1,000 disjoint deletes each naming the whole document fit one
+  message (3.9 s for a 200,000-character document, review 2 of day 3). A message's delete work is then bounded by
+  the document's size.
 - **An insert under another replica's id.** A replica only makes ids under its own; a client inserting under
   another's could take that replica's next ids, and the other's next edit would be refused as a conflict.
 - **A reused id** (`ConflictError`): the server keeps the first and refuses the second, so clients only ever see its
@@ -345,13 +349,14 @@ What it logs:
 - **Origins.** A browser lets any page open a WebSocket to any address and sends the page's origin with the
   handshake, so without a check any site open in the same browser could read and edit every document on a local
   server. A handshake whose `Origin` isn't allowed gets HTTP 403. The default allows the client's dev server
-  (`http://localhost:5173`, `http://127.0.0.1:5173`); `COEDIT_ORIGINS` sets the list. A handshake without an
+  (`http://localhost:5173`, `http://127.0.0.1:5173`); `COEDIT_ORIGINS` sets the list, each origin spelled as a browser sends it. A handshake without an
   `Origin` (not a browser: the tests, a script) is let through.
 - **Dead connections.** The server pings every connection every 30 seconds and drops one that hasn't answered the
   previous ping; a laptop whose lid closed sends no close, and its cursor would otherwise stay until TCP gives up.
 - **The catch-up is paced**: a joining client gets the log one batch at a time, each once the one before has been
-  written out to the socket; entries logged meanwhile come from the log in order, and live relays start when it
-  reaches the end. Written all at once, a long log looked like a slow reader and got a reading client dropped on
+  written out to the socket; entries logged meanwhile come from the log in order, and nothing else (no live ops,
+  presence or leaves) is sent to it until it reaches the end, when it gets the cursors shown and live relays start.
+  Each batch is found by measuring only the entries it holds. Written all at once, a long log looked like a slow reader and got a reading client dropped on
   every attempt (review of day 3).
 - **A client that stops reading** is dropped once 16 MiB of live messages is queued for it. It reconnects and catches
   up from the log, which is what makes dropping it safe.

@@ -353,6 +353,15 @@ same ids cost 20 million lookups, about 5 seconds of a blocked event loop; the s
 which no replica writes. Third: a refused handshake (404 or 403) reset by the client at once crashed the process,
 because Node takes its socket error listener off before emitting `'upgrade'`.
 
+**And the second round?** It reviewed only the fixes, and found five things they broke or missed. The overlap rule
+bounded one delete, but a message can carry a thousand, so the server now also refuses a message whose deletes name
+more ids than the document holds. The paced catch-up still sent presence relays to a member mid-catch-up, which
+counted the batch in flight against the slow-reader limit; and it measured 1,000 log entries for each batch of 25.
+A refused handshake's socket was never destroyed, so `close()` could hang. And the origin setting accepted spellings
+no browser sends; now an origin must be what `new URL(origin).origin` returns. The lesson I take: a fix for a cost
+problem needs its bound stated for the whole unit of work (a message, not an operation), and a fix that adds a new
+mode (catching up) needs every other path checked against it.
+
 **Why weren't those caught by your tests?** They're about scale and hostile timing, and the tests were about
 correctness of ordinary use: no test made a log bigger than the slow-reader limit, sent overlapping spans, or reset a
 connection mid-answer. The review also ran 44 mutants of the day's code; ten survived, and six of those now have tests

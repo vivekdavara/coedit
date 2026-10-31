@@ -95,17 +95,19 @@ Measured on the Apple M3 (macOS 26.6.2, Node 23.11.0), **on battery** (46% at th
 22:44), no sleep in `pmset -g log` during the session and none during each latency run (the script checks). All
 inputs are synthetic; everything runs over loopback.
 
-- **Edit to acknowledgement and to the other clients** (`npm run sync-latency -w @coedit/client`, at `4214531`, with
-  the first review agent running tests alongside, so read these as an upper bound for this machine): a writer types
-  one character every 5 ms at the end of the text, 2,000 edits of which the first 200 are a warm-up, paced by the
-  clock; the server is its own process; the writer and the readers share one process. Nearest-rank percentiles, in
-  milliseconds:
+- **Edit to acknowledgement and to the other clients** (`npm run sync-latency -w @coedit/client`): a writer types one
+  character every 5 ms at the end of the text, 2,000 edits of which the first 200 are a warm-up, paced by the clock;
+  the server is its own process; the writer and the readers share one process. Nearest-rank percentiles, in
+  milliseconds. The first three rows at `4214531` with the first review agent running tests alongside; the last two at
+  `3a56512` with nothing of mine running (VLC was using about a fifth of a core); they agree:
 
-  | Readers | Run | ack p50 | ack p99 | ack max | remote p50 | remote p95 | remote p99 | remote max |
-  | ------: | --: | ------: | ------: | ------: | ---------: | ---------: | ---------: | ---------: |
-  |       3 |   1 |    0.56 |    1.94 |    5.19 |       0.77 |       1.57 |       2.48 |       6.02 |
-  |       3 |   2 |    0.55 |    2.19 |   13.32 |       0.75 |       1.44 |       2.71 |      13.59 |
-  |      10 |   1 |    0.54 |    1.86 |    4.58 |       1.00 |       2.05 |       3.26 |       8.22 |
+  | Readers | Run              | ack p50 | ack p99 | ack max | remote p50 | remote p95 | remote p99 | remote max |
+  | ------: | ---------------- | ------: | ------: | ------: | ---------: | ---------: | ---------: | ---------: |
+  |       3 | 1 (review on)    |    0.56 |    1.94 |    5.19 |       0.77 |       1.57 |       2.48 |       6.02 |
+  |       3 | 2 (review on)    |    0.55 |    2.19 |   13.32 |       0.75 |       1.44 |       2.71 |      13.59 |
+  |      10 | 1 (review on)    |    0.54 |    1.86 |    4.58 |       1.00 |       2.05 |       3.26 |       8.22 |
+  |       3 | 3 (nothing else) |    0.57 |    1.90 |   36.68 |       0.78 |       1.53 |       2.43 |      36.88 |
+  |      10 | 2 (nothing else) |    0.54 |    2.10 |    5.39 |       1.02 |       2.13 |       3.26 |       6.02 |
 
   "remote" counts each reader's copy (5,400 and 18,000 samples). A round trip through the server costs about half a
   millisecond here; network latency would dominate any real deployment.
@@ -122,7 +124,7 @@ inputs are synthetic; everything runs over loopback.
 - **A long catch-up** (`review-d3-catchup-drop.test.ts`): a fresh client joining a document whose log is about 32
   MiB (801 entries), with the slow-reader limit at 256 KiB, now receives all of it (the test, which builds the log
   first, takes about 3 s); before the fix it received nothing and was dropped on every attempt.
-- **Tests**: 252 at the start of the day (`c60a050`), 369 at `692bb29` (`npm test`); CI green on Node 22 and 24.
+- **Tests**: 252 at the start of the day (`c60a050`), 382 at `3a56512` (`npm test`); CI green on Node 22 and 24.
 
 ## Results (day 2)
 
@@ -293,6 +295,30 @@ and three equivalent: two of the sync client's `#sent` counter, which was always
 one covered by `leave` being idempotent. Its docs list (a resent delete is logged again; ws closes 1009 and 1007
 without an error message; stale comments) is fixed in the code and DESIGN.md.
 
+**Round 2** (at `692bb29`, round 1's fixes only, "what did each fix break or miss?"; about 22 minutes) reproduced 5
+more, each now a test in `packages/server/test/` (the `review-d3r2-` files):
+
+1. **The overlap rule bounded one delete, not one message**: 1,000 disjoint deletes each naming a whole
+   200,000-character document, in one 0.9 MiB message, took 3.9 s. A message's deletes may now name at most as many
+   ids as the document holds, which no honest client passes, since it deletes each element once (`578c354`).
+2. **Presence relays during a catch-up counted the batch in flight** against the slow-reader limit, so with a limit
+   under 1 MiB one presence message dropped a client reading its catch-up. A member catching up now gets nothing but
+   its catch-up, then the cursors shown (`5b9bdc5`).
+3. **Each catch-up batch measured the next 1,000 entries** to keep the few that fit: a 117 MiB catch-up took 5.5 s
+   against 0.18 s for batching the log once. `batchEnd` measures only what the batch holds (`5b9bdc5`).
+4. **A refused handshake's socket was never destroyed**, so a client keeping its end open held `close()`, and a
+   SIGTERM, waiting for good. It's destroyed once the answer is written (`41b5103`).
+5. **`COEDIT_ORIGINS` still took spellings no browser sends** (`http://localhost:80`, `127.1`, long IPv6). An origin
+   must now be what `new URL(origin).origin` gives back (`3a56512`).
+
+Four of its mutants survived: the overlap comparator ignoring the replica, a catch-up batch with no byte limit, a
+member sent its own cursor (all three pinned, `578c354`, `5b9bdc5`), and `sent()` called on a write error (nearly
+equivalent: the connection is closing then). A randomized hub simulation it ran (150 seeds of 60 steps: joins,
+replacements, leaves, presence, multi-batch logs, synchronous and asynchronous writes) found no entry skipped,
+repeated or out of order. It also notes that the replica-id check can be got round by saying `hello` with a victim's
+id, which presence reveals: nothing is authenticated (see "Limitations (day 3)"). No third round: the session's power
+ran low (17% at 23:13).
+
 ## Review of day 2
 
 One review agent at a time, each in its own worktree with a correctness brief, writing each finding as a failing test
@@ -423,7 +449,10 @@ support this machine's Node 23).
   acknowledged.
 - **Nothing is authenticated.** The server binds 127.0.0.1, checks the page's origin, and trusts each client's
   replica id. A client that reuses another's id (none would by accident: they're 16 random bytes) can have its edits
-  refused, and two connections with the same id replace each other.
+  refused, and two connections with the same id replace each other. The server refuses inserts under another
+  connection's id, but a client can say `hello` with any id (presence reveals the others').
+- **A message's cost is bounded by the document's size, not by the message's**: a client may send deletes naming
+  the whole document in every message, each logged, and nothing limits how often.
 - **The server refuses rather than repairs**: an operation it refuses closes that client for good (the editor says so
   and keeps the text). Only a buggy or tampered client sends one, but a client that hits the document's capacity is
   stopped the same way.
