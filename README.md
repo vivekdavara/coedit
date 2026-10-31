@@ -7,12 +7,15 @@ Several people edit one document at once, each in their own tab; edits merge wit
 every replica applies the same commuting operations. Built to be explained end to end: one ordering rule with a short
 proof, a strict wire format, and a test harness that is itself tested.
 
-**Status: day 2 of 5.** Done: the design for all five days (DESIGN.md), the workspaces and CI, the wire format with a
+**Status: day 3 of 5.** Done: the design for all five days (DESIGN.md), the workspaces and CI, the wire format with a
 strict decoder, the network simulator for convergence tests and its self-test, the client's mapping from textarea
-input to edits (day 1), and the CRDT itself: RGA with Lamport ids, runs placed by the skip rule, tombstones,
-operations in any order (waiting ones held and released), conflicts refused, positions as ids for presence, all
-property-tested for convergence through the simulator and the real codec (day 2). Next: sync and presence over
-WebSockets (day 3), persistence and tombstone collection (day 4), release (day 5).
+input to edits (day 1); the CRDT itself: RGA with Lamport ids, runs placed by the skip rule, tombstones, operations in
+any order, conflicts refused, positions as ids for presence, all property-tested for convergence (day 2); and sync:
+the WebSocket server with one hub per document (a numbered log, the echo as acknowledgement, refusing what it can't
+place or what would use up the clocks), the sync client (an outbox, catch-up then resend on reconnect, backoff), the
+React editor patching remote changes into the textarea with the caret kept in place, remote cursors, offline editing,
+and convergence tested end to end on the real server (day 3). Next: persistence and tombstone collection, Playwright
+with two browsers (day 4), release (day 5).
 
 ## Architecture
 
@@ -32,24 +35,30 @@ flowchart LR
 
 The server orders operations into a numbered log and relays each to every client, the sender included (the echo is
 the acknowledgement). It applies every operation to its own replica first, so it refuses what would split replicas
-apart. Built so far: the wire format, the CRDT, the edit mapping, the server's health endpoint; the rest is specified
-in DESIGN.md.
+apart, and it accepts only operations whose dependencies it has placed, so its log is in causal order. Built so far:
+everything but the op log and snapshots on disk (day 4); until then a server restart loses its documents, and
+clients that held them stop with `ahead-of-server` rather than guess.
 
 ## Layout
 
-| Path                            | What                                                                      |
-| ------------------------------- | ------------------------------------------------------------------------- |
-| `DESIGN.md`                     | the specification: RGA and why it converges, wire format, sync protocol   |
-| `packages/crdt/src/rga.ts`      | the CRDT: insert, delete, waiting operations, conflicts, presence         |
-| `packages/crdt/src/ids.ts`      | the id order (counter, then replica by code unit) and a map keyed by ids  |
-| `packages/crdt/src/json.ts`     | a strict JSON reader (duplicate keys, lone surrogates, rounding: refused) |
-| `packages/crdt/src/protocol.ts` | operations and protocol messages; strict decoder, canonical encoder       |
-| `packages/crdt/test/harness/`   | the network simulator, the toy CRDTs that test it, the RGA as a subject   |
-| `test/`                         | repo-wide checks: the docs against the code, the workspace exports        |
-| `packages/crdt/scripts/`        | `harness-stats`, `bench-codec`, `deep-convergence`, `worst-delete`        |
-| `packages/server/src/`          | the server: `/healthz` so far; `main.ts` is the command line              |
-| `packages/client/src/edit.ts`   | textarea before/after + caret to one edit, in code points                 |
-| `packages/client/src/App.tsx`   | the editor shell (local only until day 3)                                 |
+| Path                              | What                                                                      |
+| --------------------------------- | ------------------------------------------------------------------------- |
+| `DESIGN.md`                       | the specification: RGA and why it converges, wire format, sync protocol   |
+| `packages/crdt/src/rga.ts`        | the CRDT: insert, delete, waiting operations, conflicts, presence         |
+| `packages/crdt/src/ids.ts`        | the id order (counter, then replica by code unit) and a map keyed by ids  |
+| `packages/crdt/src/json.ts`       | a strict JSON reader (duplicate keys, lone surrogates, rounding: refused) |
+| `packages/crdt/src/protocol.ts`   | operations and protocol messages; strict decoder, canonical encoder       |
+| `packages/crdt/test/harness/`     | the network simulator, the toy CRDTs that test it, the RGA as a subject   |
+| `test/`                           | repo-wide checks: the docs against the code, the workspace exports        |
+| `packages/crdt/scripts/`          | `harness-stats`, `bench-codec`, `deep-convergence`, `worst-delete`        |
+| `packages/server/src/hub.ts`      | one document: the server's replica, the numbered log, members, presence   |
+| `packages/server/src/server.ts`   | HTTP (`/healthz`) and the `/sync` WebSocket: sessions, origins, heartbeat |
+| `packages/server/src/main.ts`     | the command line (`COEDIT_HOST`, `COEDIT_PORT`, `COEDIT_ORIGINS`)         |
+| `packages/client/src/sync.ts`     | the sync client: replica, outbox, echo matching, reconnect, presence      |
+| `packages/client/src/edit.ts`     | textarea before/after + caret to one edit, in code points                 |
+| `packages/client/src/textarea.ts` | remote changes applied to the textarea's text and selection               |
+| `packages/client/src/App.tsx`     | the editor: textarea, remote cursors, status, offline switch              |
+| `packages/client/scripts/`        | `sync-latency`: edit to acknowledgement and to other clients, loopback    |
 
 ## How to run
 
@@ -73,8 +82,12 @@ npm run dev -w @coedit/client
 ```
 
 The server listens on `127.0.0.1:8110` (`COEDIT_HOST`, `COEDIT_PORT`); `curl http://127.0.0.1:8110/healthz` gives
-`{"status":"ok","protocol":1}`. The client is at `http://localhost:5173`; for now it edits a local document and shows
-the edit each input became.
+`{"status":"ok","protocol":1}`. Pages may connect from the client's dev server only; `COEDIT_ORIGINS` (origins
+separated by commas) sets which. The client is at `http://localhost:5173`: open `http://localhost:5173/?doc=demo` in
+two tabs (or two browsers) and type in both. The dev server passes `/sync` on to the sync server
+(`COEDIT_SYNC_TARGET`, default `ws://127.0.0.1:8110`). "Go offline" closes the connection: edits made meanwhile wait
+in the outbox and merge when it's pressed again. Each tab is a new replica, so a reload starts from the server's log
+(edits not yet acknowledged are lost with the tab).
 
 ## Results (day 2)
 
@@ -189,7 +202,30 @@ Measured on an Apple M3 (macOS 26.6.2, Node 23.11.0, on AC, awake throughout). A
 - `packages/client/test/edit.test.ts`: any caret gives a correct edit; minimal without a caret; a random edit with the
   browser's caret comes back exactly; UTF-16/code-point conversion at every boundary.
 - `packages/server/test/`: health, HEAD, 405, 404, the default bind address, a taken port, close mid-request, port
-  parsing; `main.test.ts` runs the command line as a child process (signals, exit codes, IPv6).
+  parsing; `main.test.ts` runs the command line as a child process (signals, exit codes, IPv6, `COEDIT_ORIGINS`);
+  `signal-order.test.ts` checks, from inside the child, that the signal handlers exist when "listening" is printed.
+- `packages/server/test/hub.test.ts` (day 3): the document hub without sockets: numbering and relay, catch-up from any
+  `have` in batches, `ahead-of-server`, replacement, a resent insert not logged and a resent delete logged, each
+  refusal (origin missing, delete naming a missing id, a reused id, counters past the clock, a full document) leaving
+  the server's state byte for byte as it was, the clock argument run to the end with a capacity of 1,000, presence.
+- `packages/server/test/sync.test.ts` (day 3): the endpoint over real sockets: relay, catch-up, presence and the null
+  on leaving, each protocol error's code and close, the hello timeout, 1 MiB read and one byte more closed with 1009,
+  replacement (4001), 404, 403 by origin, a stalled reader dropped while the writer carries on, the heartbeat
+  dropping a client that doesn't answer pings.
+- `packages/client/test/sync-unit.test.ts` (day 3): the sync client against a scripted socket: the joining sequence,
+  the outbox held, echoed, resent from the right place and batched, an identical delete as the echo, presence order on
+  reconnect, hold and release, each fatal code against `server-error`, the backoff's delays exactly, an error with no
+  close (Node's WebSocket after a refused connection).
+- `packages/client/test/sync.test.ts` and `sync-convergence.test.ts` (day 3): sync clients on the real server over
+  Node's own WebSocket: converging, offline edits, a late joiner on a 2,500-entry log, cursors, a client started before
+  the server, a server that lost its log, a full document; and 100 generated schedules of edits, dropped connections,
+  offline spells and pauses across 2 to 4 clients, after each of which every client's replica state is the server's
+  and the text it patched from the reported changes is the server's text.
+- `packages/client/test/textarea.test.ts` (day 3): remote changes on the textarea's text and selection, each rule,
+  surrogate pairs, and a property over a real replica: the patched text is the replica's and the caret stays next to
+  the element it was after.
+- `packages/crdt/test/rga-ready.test.ts`, `batch.test.ts` (day 3): `Rga.ready` against an id-by-id check and with its
+  lookups counted; the pre-encoded messages against the encoders, batches within 1,000 operations and 1 MiB.
 - `test/docs.test.ts` (parsing in `test/docs.ts`): every npm script, workspace, repo path and `:line` the docs name
   exists, and the ports and response they quote are the code's; the parser is also tested on twelve bad fragments.
   `test/exports.test.ts`: every workspace export imports.
@@ -317,6 +353,28 @@ one rule and short proof; code points as elements; any delivery order, with pend
 delivery; a strict reader because `JSON.parse` lets two replicas read one message differently; the server's echo as
 the acknowledgement; Node's type stripping and test runner rather than a build step (and Vitest 5 and ESLint 10 don't
 support this machine's Node 23).
+
+## Limitations (day 3)
+
+- **No persistence yet** (day 4): a server restart loses every document. A client that held one stops with
+  `ahead-of-server` and keeps its text on screen, but can't rejoin without a reload, which loses what it hadn't had
+  acknowledged.
+- **Nothing is authenticated.** The server binds 127.0.0.1, checks the page's origin, and trusts each client's
+  replica id. A client that reuses another's id (none would by accident: they're 16 random bytes) can have its edits
+  refused, and two connections with the same id replace each other.
+- **The server refuses rather than repairs**: an operation it refuses closes that client for good (the editor says so
+  and keeps the text). Only a buggy or tampered client sends one, but a client that hits the document's capacity is
+  stopped the same way.
+- **The outbox lives in memory**: closing a tab loses edits the server hasn't acknowledged.
+- **Every operation still scans one array**, O(n) in elements including tombstones, on the server too; nothing is
+  collected yet (day 4 measures and collects). The editor redraws the cursor mirror from the whole text on every
+  change.
+- **The cursor mirror only approximates the textarea's layout** (same font, padding, wrapping and scrollbar gutter);
+  a browser that wraps a textarea differently from a div would draw a remote caret off by a line.
+- Day 2's limits that day 3 closes: clients now receive only what the server accepted, and the server refuses a
+  delete naming ids it lacks (checking spans run by run), so the 10-million-id delete never reaches a client; the
+  server keeps the first of two conflicting inserts and refuses the second; and it refuses counters more than its
+  capacity past its clock, so no client can use up the clocks.
 
 ## Limitations (day 2)
 
