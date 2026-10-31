@@ -302,6 +302,12 @@ function refuseUpgrade(socket: Socket, status: number, reason: string): void {
   socket.on('error', () => {
     socket.destroy();
   });
+  // And close it once the answer is written: after 'upgrade' the HTTP server no longer manages the socket, it allows
+  // half-open connections, and closeAllConnections() doesn't reach it, so a client that kept its end open held
+  // close() (and a SIGTERM) waiting for good (review 2 of day 3).
+  socket.once('finish', () => {
+    socket.destroy();
+  });
   socket.end(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
 }
 
