@@ -21,8 +21,9 @@ class FakeMember implements Member {
     this.replica = replica;
   }
 
-  send(text: string): void {
+  send(text: string, sent?: () => void): void {
     this.texts.push(text);
+    sent?.();
   }
 
   replace(): void {
@@ -119,6 +120,106 @@ describe('joining', () => {
     old.take();
     assert.equal(hub.submit(renewed, [insert(1, 'a', null, 'x')]), null);
     assert.deepEqual(old.take(), []);
+  });
+});
+
+/** A member whose writes complete only when the test says so, like a socket draining. */
+class SlowMember extends FakeMember {
+  readonly pending: (() => void)[] = [];
+
+  override send(text: string, sent?: () => void): void {
+    this.texts.push(text);
+    if (sent !== undefined) this.pending.push(sent);
+  }
+
+  /** Completes the oldest write. */
+  drain(): void {
+    this.pending.shift()?.();
+  }
+}
+
+describe('a paced catch-up', () => {
+  const chain = (n: number, from = 1): Op[] =>
+    Array.from({ length: n }, (_, i) =>
+      insert(from + i, 'a', from + i === 1 ? null : [from + i - 1, 'a'], 'x'),
+    );
+
+  test('sends one batch at a time, each once the one before is written out', () => {
+    const hub = new DocumentHub('d');
+    const a = joined(hub, 'a');
+    for (let i = 0; i < 3; i++) assert.equal(hub.submit(a, chain(1_000, i * 1_000 + 1)), null);
+    const slow = new SlowMember('slow');
+    assert.equal(hub.join(slow, 0), null);
+    const firsts = () => slow.take().map((m) => (m.type === 'ops' ? m.from : m.type));
+    assert.deepEqual(firsts(), ['welcome', 1]);
+    slow.drain();
+    assert.deepEqual(firsts(), [1_001]);
+    slow.drain();
+    assert.deepEqual(firsts(), [2_001]);
+    slow.drain();
+    assert.deepEqual(firsts(), []);
+    assert.equal(slow.pending.length, 0);
+  });
+
+  test('entries logged meanwhile come from the log, in order, not as live relays; then live ones', () => {
+    const hub = new DocumentHub('d');
+    const a = joined(hub, 'a');
+    assert.equal(hub.submit(a, chain(1_500)), null);
+    const slow = new SlowMember('slow');
+    hub.join(slow, 0);
+    hub.presence(a, { anchor: { replica: 'a', counter: 1 }, head: null });
+    assert.equal(hub.submit(a, chain(10, 1_501)), null);
+    let messages = slow.take();
+    // The presence relay goes out at once; ops wait for the catch-up.
+    assert.deepEqual(
+      messages.map((m) => (m.type === 'ops' ? [m.from, m.ops.length] : m.type)),
+      ['welcome', [1, 1_000], 'presence'],
+    );
+    slow.drain();
+    messages = slow.take();
+    assert.deepEqual(
+      messages.map((m) => (m.type === 'ops' ? [m.from, m.ops.length] : m.type)),
+      [[1_001, 510]],
+    );
+    slow.drain();
+    // Caught up: the cursors shown, then live relays.
+    assert.deepEqual(slow.take(), [
+      {
+        type: 'presence',
+        replica: 'a',
+        cursor: { anchor: { replica: 'a', counter: 1 }, head: null },
+      },
+    ]);
+    assert.equal(hub.submit(a, chain(1, 1_511)), null);
+    assert.deepEqual(
+      slow.take().map((m) => (m.type === 'ops' ? m.from : m.type)),
+      [1_511],
+    );
+  });
+
+  test('a member that leaves during its catch-up is sent nothing more', () => {
+    const hub = new DocumentHub('d');
+    const a = joined(hub, 'a');
+    assert.equal(hub.submit(a, chain(2_000)), null);
+    const slow = new SlowMember('slow');
+    hub.join(slow, 0);
+    slow.take();
+    hub.leave(slow);
+    slow.drain();
+    assert.deepEqual(slow.take(), []);
+    // And one replaced during it: the new member's catch-up runs, the old one's stops.
+    const again = new SlowMember('again');
+    hub.join(again, 0);
+    again.take();
+    const renewed = new SlowMember('again');
+    hub.join(renewed, 0);
+    assert.equal(again.replaced, true);
+    again.drain();
+    assert.deepEqual(again.take(), []);
+    assert.deepEqual(
+      renewed.take().map((m) => (m.type === 'ops' ? m.from : m.type)),
+      ['welcome', 1],
+    );
   });
 });
 

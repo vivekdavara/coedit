@@ -11,6 +11,7 @@
 import {
   ConflictError,
   MAX_ERROR_MESSAGE_LENGTH,
+  MAX_OPS,
   PROTOCOL_VERSION,
   ProtocolError,
   Rga,
@@ -29,8 +30,11 @@ import {
 /** A client joined to a hub. */
 export interface Member {
   readonly replica: string;
-  /** Sends one server message, already encoded. */
-  send(text: string): void;
+  /**
+   * Sends one server message, already encoded. With `sent`, calls it once the message has been written out (handed
+   * to the operating system), and not at all if the connection is going: the catch-up is paced by it.
+   */
+  send(text: string, sent?: () => void): void;
   /** Ends the connection without an error message (a newer connection of the same replica replaced it). */
   replace(): void;
 }
@@ -46,6 +50,13 @@ export interface HubOptions {
   readonly capacity?: number;
 }
 
+interface MemberState {
+  /** Its cursor; null until it sends one, or after it hides it. */
+  cursor: Cursor | null;
+  /** The next log entry its catch-up sends; null once caught up and receiving live relays. */
+  next: number | null;
+}
+
 /** The server's replica id. It never makes an element, so it never names one. */
 const SERVER_REPLICA = 'server';
 
@@ -54,8 +65,8 @@ export class DocumentHub {
   readonly #rga: Rga;
   /** The log: entry n (from 1) is `#log[n - 1]`, as encodeOp wrote it. */
   readonly #log: string[] = [];
-  /** Joined members, each with its cursor (null until it sends one). */
-  readonly #members = new Map<Member, Cursor | null>();
+  /** Joined members: each one's cursor, and where its catch-up has got to. */
+  readonly #members = new Map<Member, MemberState>();
 
   constructor(doc: string, options: HubOptions = {}) {
     this.doc = doc;
@@ -110,18 +121,43 @@ export class DocumentHub {
         seq: this.#log.length,
       }),
     );
-    let from = have + 1;
-    for (const batch of batchOps(this.#log.slice(have))) {
-      member.send(encodeServerOps(from, batch));
-      from += batch.length;
-    }
-    for (const [other, cursor] of this.#members) {
-      if (cursor !== null) {
-        member.send(encodeServerMessage({ type: 'presence', replica: other.replica, cursor }));
-      }
-    }
-    this.#members.set(member, null);
+    const state: MemberState = { cursor: null, next: have + 1 };
+    this.#members.set(member, state);
+    this.#catchUp(member, state);
     return null;
+  }
+
+  /**
+   * Sends a joining member the log from `state.next` on, one batch at a time, each once the one before has been
+   * written out, so a member reading as fast as it can is never dropped as a slow reader however long the log (the
+   * review of day 3 found that writing it all at once did, at about 16 MiB of log). Entries logged meanwhile are sent
+   * the same way. When it reaches the end, the member gets the cursors shown and live relays from then on.
+   */
+  #catchUp(member: Member, state: MemberState): void {
+    for (;;) {
+      if (this.#members.get(member) !== state) return; // left, or replaced
+      const next = state.next as number;
+      if (next > this.#log.length) {
+        state.next = null;
+        for (const [other, { cursor }] of this.#members) {
+          if (other !== member && cursor !== null) {
+            member.send(encodeServerMessage({ type: 'presence', replica: other.replica, cursor }));
+          }
+        }
+        return;
+      }
+      const batch = batchOps(this.#log.slice(next - 1, next - 1 + MAX_OPS))[0] as string[];
+      state.next = next + batch.length;
+      // Whether the send has called back yet, and whether this loop is still inside the send (a member that writes
+      // synchronously calls back from within it: then the loop carries on, rather than recurse).
+      const progress = { inside: true, written: false };
+      member.send(encodeServerOps(next, batch), () => {
+        progress.written = true;
+        if (!progress.inside) this.#catchUp(member, state);
+      });
+      progress.inside = false;
+      if (!progress.written) return;
+    }
   }
 
   /**
@@ -173,7 +209,8 @@ export class DocumentHub {
     let next = from;
     for (const batch of batchOps(this.#log.slice(from - 1))) {
       const text = encodeServerOps(next, batch);
-      for (const other of this.#members.keys()) other.send(text);
+      // A member still catching up gets these from the log, in order, when its catch-up reaches them.
+      for (const [other, state] of this.#members) if (state.next === null) other.send(text);
       next += batch.length;
     }
     return refusal;
@@ -212,7 +249,7 @@ export class DocumentHub {
   presence(member: Member, cursor: Cursor | null): void {
     if (!this.#members.has(member))
       throw new Error(`${member.replica} isn't joined to ${this.doc}`);
-    this.#members.set(member, cursor);
+    (this.#members.get(member) as MemberState).cursor = cursor;
     const text = encodeServerMessage({ type: 'presence', replica: member.replica, cursor });
     for (const other of this.#members.keys()) if (other !== member) other.send(text);
   }

@@ -30,7 +30,8 @@ export interface ServerOptions {
   helloTimeoutMs?: number;
   /**
    * The most bytes queued for one client that isn't reading (default 16 MiB). Past it the server drops the
-   * connection rather than hold more; the client reconnects and catches up from the log.
+   * connection rather than hold more; the client reconnects and catches up from the log. The catch-up itself doesn't
+   * count: it goes one batch at a time, each once the one before is written out (DocumentHub's #catchUp).
    */
   maxBufferedBytes?: number;
   /**
@@ -236,8 +237,15 @@ class Sync {
           const hub = this.#hub(message.doc);
           const member: Member = {
             replica: message.replica,
-            send(text) {
+            send(text, sent) {
               if (ws.readyState !== ws.OPEN) return;
+              if (sent !== undefined) {
+                // The catch-up, paced by this: at most one of its batches is queued at a time.
+                ws.send(text, (error) => {
+                  if (!error) sent();
+                });
+                return;
+              }
               ws.send(text);
               // A client that stops reading: drop it rather than queue without bound. It reconnects and catches
               // up from the log.
