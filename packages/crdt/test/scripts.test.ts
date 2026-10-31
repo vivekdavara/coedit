@@ -129,4 +129,19 @@ test('editing measures a session it actually ran: every tenth, both readers conv
       out,
     );
   assert.ok(heap !== null && Number(heap[1]) > 0, out);
+  const collected =
+    /collection \(leaf rule, every delete old enough\): ([\d,]+) of ([\d,]+) tombstones \(([\d.]+)%\).*; ([\d,]+) elements to ([\d,]+), kept as [\d,]+ collected spans; snapshot ([\d,]+) bytes to ([\d,]+)/.exec(
+      out,
+    );
+  assert.ok(collected !== null, out);
+  const [taken, tombstones, , before, after, snapBefore, snapAfter] = collected
+    .slice(1)
+    .map((n) => Number(n.replaceAll(',', '')));
+  assert.ok((taken as number) > 0 && (taken as number) <= (tombstones as number), out);
+  assert.equal(
+    (before as number) - (after as number),
+    taken,
+    'the elements went down by what was collected',
+  );
+  assert.ok((snapAfter as number) < (snapBefore as number), out);
 });

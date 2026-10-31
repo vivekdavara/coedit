@@ -188,3 +188,24 @@ if (gc === undefined) {
     `  heap: a replica rebuilt from the snapshot takes ${fmt(Math.round(each))} bytes, ${(each / sizes.elements).toFixed(0)} per element (mean of ${copies.length} kept at once; ${same ? 'same text' : 'TEXT DIFFERS'})`,
   );
 }
+
+// Collection (day 4, the leaf rule): a server's replica of the session (each operation stamped with its place in the
+// log), collecting every leaf tombstone once all the deletes are old enough. The paste and its deletion are left out:
+// their 100,000 tombstones are one run after a live origin, all leaves, and would make the share look better than
+// the session's own.
+const server = new Rga('server');
+for (let i = 0; i < log.length; i++) server.apply(log[i] as Op, i + 1);
+const held = server.sizes();
+const snapshotBefore = server.snapshot().reduce((sum, op) => sum + utf8Length(encodeOp(op)) + 1, 0);
+start = performance.now();
+const taken = server.collect(log.length);
+const collectMs = performance.now() - start;
+const left = server.sizes();
+const snapshotAfter =
+  server.snapshot().reduce((sum, op) => sum + utf8Length(encodeOp(op)) + 1, 0) +
+  server.collectedSpans().reduce((sum, s) => sum + utf8Length(JSON.stringify(s)) + 1, 0);
+// The decoding reader applied the same log and never collects: the text must be the same.
+if (server.text() !== decoded.text()) throw new Error('collection changed the text');
+console.log(
+  `collection (leaf rule, every delete old enough): ${fmt(taken)} of ${fmt(held.tombstones)} tombstones (${((taken / held.tombstones) * 100).toFixed(1)}%) in ${collectMs.toFixed(0)} ms; ${fmt(held.elements)} elements to ${fmt(left.elements)}, kept as ${fmt(server.collectedSpans().length)} collected spans; snapshot ${fmt(snapshotBefore)} bytes to ${fmt(snapshotAfter)}`,
+);
