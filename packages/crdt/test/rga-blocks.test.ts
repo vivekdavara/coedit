@@ -76,7 +76,7 @@ function run(steps: readonly Step[], blockSize: number) {
       snapshot: r.snapshot(),
     };
   });
-  return { seen, views };
+  return { seen, views, log };
 }
 
 const sessions = fc.array(step, { minLength: 1, maxLength: 60, size: 'max' });
@@ -86,8 +86,42 @@ describe('blocks', () => {
     test(`of ${blockSize} element${blockSize === 1 ? '' : 's'} give exactly what one unsplit block gives`, () => {
       fc.assert(
         fc.property(sessions, (steps) => {
-          assert.deepEqual(run(steps, blockSize), run(steps, Number.MAX_SAFE_INTEGER));
+          const { seen, views } = run(steps, blockSize);
+          const reference = run(steps, Number.MAX_SAFE_INTEGER);
+          assert.deepEqual({ seen, views }, { seen: reference.seen, views: reference.views });
         }),
+        { numRuns: 300 },
+      );
+    });
+  }
+
+  // Review 2 of day 4: with log-order delivery only, counting a placed run's tombstones as visible survived (the
+  // elements deleted ahead of their insert arrive as tombstones only when operations come out of order).
+  for (const blockSize of [1, 2, 3]) {
+    test(`of ${blockSize} under out-of-order delivery, duplicates and deletes ahead agree with one block`, () => {
+      fc.assert(
+        fc.property(
+          sessions,
+          fc.array(fc.nat(), { maxLength: 400, size: 'max' }),
+          (steps, picks) => {
+            const log = run(steps, Number.MAX_SAFE_INTEGER).log;
+            // Each operation once, in an order the picks choose, then every third again.
+            const left = log.map((_, i) => i);
+            const order: number[] = [];
+            for (let i = 0; left.length > 0; i++) {
+              order.push(...left.splice((picks[i] ?? 0) % left.length, 1));
+            }
+            for (let i = 0; i < log.length; i += 3) order.push(i);
+            const receive = (size: number) => {
+              const r = new Rga('z', { blockSize: size });
+              const changes = order.map((i) => r.apply(log[i] as Op));
+              const before: unknown[] = [];
+              for (let i = 0; i <= r.length; i++) before.push(r.idBefore(i));
+              return { changes, text: r.text(), state: r.state(), sizes: r.sizes(), before };
+            };
+            assert.deepEqual(receive(blockSize), receive(Number.MAX_SAFE_INTEGER));
+          },
+        ),
         { numRuns: 300 },
       );
     });

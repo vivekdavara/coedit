@@ -261,11 +261,13 @@ export class DocumentStore {
   #prune(name: string, keepFrom: number): void {
     try {
       for (const other of fs.readdirSync(this.dir)) {
-        if (SNAPSHOT.test(other) && other < name) fs.rmSync(path.join(this.dir, other));
+        if (SNAPSHOT.test(other) && other < name)
+          fs.rmSync(path.join(this.dir, other), { force: true });
       }
       while (this.#segments.length > 1 && (this.#segments[0] as { last: number }).last < keepFrom) {
         const old = this.#segments[0] as { first: number };
-        fs.rmSync(path.join(this.dir, `log-${pad(old.first)}.jsonl`));
+        // force: a file already gone (deleted by hand) mustn't stop every later prune (review 2 of day 4).
+        fs.rmSync(path.join(this.dir, `log-${pad(old.first)}.jsonl`), { force: true });
         this.#segments.shift();
       }
       if (this.#fsync) syncDirectory(this.dir);

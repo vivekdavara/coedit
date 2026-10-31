@@ -232,6 +232,35 @@ describe('snapshots in a hub', () => {
     h.close();
   });
 
+  test('a reloaded document with entries past its interval snapshots at the next message (review 2)', (t) => {
+    const root = tempDir(t);
+    const { h } = filled(root, 4); // snapshotEvery 5: none yet
+    h.close();
+    // Reopened with an interval of 2: entries 1 to 4 are already past it.
+    const again = hub(root, { snapshotEvery: 2 });
+    const a = new ReplicaMember('a2', again.seq);
+    again.join(a, again.seq);
+    type(again, a, 0, 0, 'q');
+    const dir = path.join(root, directoryName('doc'));
+    assert.ok(
+      fs.readdirSync(dir).includes('snapshot-0000000000000005.jsonl'),
+      fs.readdirSync(dir).join(' '),
+    );
+    again.close();
+  });
+
+  test('closes the old segment when a snapshot starts a new one (review 2)', (t) => {
+    const root = tempDir(t);
+    const h = hub(root, { snapshotEvery: 1 });
+    const a = new ReplicaMember('a');
+    h.join(a, 0);
+    type(h, a, 0, 0, 'q');
+    const fds = fs.readdirSync('/dev/fd').length;
+    for (let i = 1; i < 20; i++) type(h, a, i, 0, 'q'); // 19 more snapshots, each starting a segment
+    assert.equal(fs.readdirSync('/dev/fd').length, fds);
+    h.close();
+  });
+
   test("don't drop log entries a member still catching up hasn't been sent", (t) => {
     const root = tempDir(t);
     const h = hub(root, { snapshotEvery: 5 });
