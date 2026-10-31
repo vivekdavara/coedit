@@ -21,7 +21,7 @@ import { DocumentHub, type Member } from '../src/hub.ts';
 
 test('one ops message of deletes that each name the whole document is handled in well under a second', () => {
   const hub = new DocumentHub('d');
-  const member: Member = { replica: 'a', send() {}, replace() {} };
+  const member: Member = { replica: 'a', send() {}, replace() {}, fail() {} };
   hub.join(member, 0);
   const runs = 20;
   const inserts: Op[] = [];

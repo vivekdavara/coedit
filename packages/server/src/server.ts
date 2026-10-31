@@ -42,6 +42,20 @@ export interface ServerOptions {
   heartbeatMs?: number;
   /** Each document replica's capacity (Rga's; default its maximum). Tests set it small. */
   capacity?: number;
+  /**
+   * The directory documents are kept in, one directory each (DocumentStore). Without it documents live in memory
+   * only, and are lost when the server stops (the tests' default).
+   */
+  dataDir?: string;
+  /** With dataDir: whether to fsync each append (default true). */
+  fsync?: boolean;
+  /** With dataDir: entries between snapshots (default 10,000). */
+  snapshotEvery?: number;
+  /**
+   * With dataDir: how long a document with no one connected stays loaded (default 60 s). Then its hub is closed and
+   * dropped, and the next join loads it from disk again. Documents in memory only are never dropped.
+   */
+  idleMs?: number;
 }
 
 export interface SyncServer {
@@ -115,6 +129,12 @@ class Sync {
   readonly #helloTimeoutMs: number;
   readonly #maxBufferedBytes: number;
   readonly #capacity: number | undefined;
+  readonly #dataDir: string | undefined;
+  readonly #fsync: boolean;
+  readonly #snapshotEvery: number | undefined;
+  readonly #idleMs: number;
+  /** Hubs with no members, and the timer that will drop each. */
+  readonly #idle = new Map<DocumentHub, ReturnType<typeof setTimeout>>();
   /** Connections that answered the last ping (or are newer than it). */
   readonly #alive = new WeakSet<WebSocket>();
   readonly #heartbeat: ReturnType<typeof setInterval>;
@@ -127,6 +147,10 @@ class Sync {
     this.#helloTimeoutMs = options.helloTimeoutMs ?? 10_000;
     this.#maxBufferedBytes = options.maxBufferedBytes ?? 16 * MAX_MESSAGE_BYTES;
     this.#capacity = options.capacity;
+    this.#dataDir = options.dataDir;
+    this.#fsync = options.fsync ?? true;
+    this.#snapshotEvery = options.snapshotEvery;
+    this.#idleMs = options.idleMs ?? 60_000;
     this.#heartbeat = setInterval(() => {
       for (const ws of this.#wss.clients) {
         if (!this.#alive.has(ws)) {
@@ -168,14 +192,52 @@ class Sync {
     clearInterval(this.#heartbeat);
     for (const ws of this.#wss.clients) ws.terminate();
     this.#wss.close();
+    for (const timer of this.#idle.values()) clearTimeout(timer);
+    this.#idle.clear();
+    for (const hub of this.#hubs.values()) hub.close();
+    this.#hubs.clear();
   }
 
-  /** The document's hub, or a new one, kept only once someone has joined it (see the hello). */
+  /**
+   * The document's hub, or a new one (loaded from disk, with a data directory), kept only once someone has joined
+   * it (see the hello). Throws if the document's files can't be read back.
+   */
   #hub(doc: string): DocumentHub {
-    return (
-      this.#hubs.get(doc) ??
-      new DocumentHub(doc, this.#capacity === undefined ? {} : { capacity: this.#capacity })
-    );
+    const hub = this.#hubs.get(doc);
+    if (hub !== undefined) {
+      clearTimeout(this.#idle.get(hub));
+      this.#idle.delete(hub);
+      return hub;
+    }
+    return new DocumentHub(doc, {
+      ...(this.#capacity === undefined ? {} : { capacity: this.#capacity }),
+      ...(this.#dataDir === undefined
+        ? {}
+        : { store: { root: this.#dataDir, fsync: this.#fsync } }),
+      ...(this.#snapshotEvery === undefined ? {} : { snapshotEvery: this.#snapshotEvery }),
+    });
+  }
+
+  /**
+   * After a member leaves, or the hub's storage failed: a broken hub is dropped at once (the next join loads the
+   * document again), and a stored one with no members after the idle time.
+   */
+  #release(doc: string, hub: DocumentHub): void {
+    if (this.#hubs.get(doc) !== hub) return;
+    if (hub.broken) {
+      this.#hubs.delete(doc);
+      hub.close();
+      return;
+    }
+    if (this.#dataDir === undefined || hub.members > 0 || this.#idle.has(hub)) return;
+    const timer = setTimeout(() => {
+      this.#idle.delete(hub);
+      if (this.#hubs.get(doc) !== hub || hub.members > 0) return;
+      this.#hubs.delete(doc);
+      hub.close();
+    }, this.#idleMs);
+    timer.unref();
+    this.#idle.set(hub, timer);
   }
 
   /**
@@ -204,7 +266,10 @@ class Sync {
     ws.on('error', () => {});
     ws.on('close', () => {
       clearTimeout(helloTimer);
-      if (joined !== null) joined.hub.leave(joined.member);
+      if (joined !== null) {
+        joined.hub.leave(joined.member);
+        this.#release(joined.hub.doc, joined.hub);
+      }
       joined = null;
     });
     ws.on('message', (data: RawData, isBinary: boolean) => {
@@ -258,10 +323,17 @@ class Sync {
               joined = null;
               ws.close(CLOSE_REPLACED, 'replaced by a newer connection');
             },
+            fail(refusal) {
+              joined = null;
+              fail(refusal.code, refusal.message);
+            },
           };
           const refusal = hub.join(member, message.have);
           if (refusal !== null) {
             fail(refusal.code, refusal.message);
+            // A hub just loaded for this hello and not kept must not keep its store open; a kept one may now be idle.
+            if (this.#hubs.get(message.doc) !== hub) hub.close();
+            else this.#release(message.doc, hub);
             return;
           }
           // Kept from the first join on: a hello refused for a document with no log (ahead-of-server) leaves none.
@@ -274,8 +346,10 @@ class Sync {
           return;
         }
         if (message.type === 'ops') {
-          const refusal = joined.hub.submit(joined.member, message.ops);
+          const { hub } = joined;
+          const refusal = hub.submit(joined.member, message.ops);
           if (refusal !== null) fail(refusal.code, refusal.message);
+          if (hub.broken) this.#release(hub.doc, hub);
         } else {
           joined.hub.presence(joined.member, message.cursor);
         }

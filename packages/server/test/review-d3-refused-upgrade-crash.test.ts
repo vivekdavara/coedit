@@ -12,11 +12,22 @@
 // protocol"); refuseUpgrade should listen for 'error' on the socket (and destroy it) before writing.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
 import { connect } from 'node:net';
+import os from 'node:os';
+import nodePath from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 
 const MAIN = fileURLToPath(new URL('../src/main.ts', import.meta.url));
+
+function data(t: TestContext): string {
+  const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'coedit-test-'));
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  return dir;
+}
 
 for (const [what, path, origin] of [
   ['a wrong path (404)', '/nope', undefined],
@@ -24,7 +35,7 @@ for (const [what, path, origin] of [
 ] as const) {
   test(`the server survives handshakes refused for ${what} and reset at once`, async (t) => {
     const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', MAIN], {
-      env: { PATH: process.env['PATH'] ?? '', COEDIT_PORT: '0' },
+      env: { PATH: process.env['PATH'] ?? '', COEDIT_PORT: '0', COEDIT_DATA: data(t) },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     t.after(() => {

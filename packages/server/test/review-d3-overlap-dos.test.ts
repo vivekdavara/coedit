@@ -19,7 +19,7 @@ import { DocumentHub, type Member } from '../src/hub.ts';
 
 test('one ops message under 1 MiB is handled in well under a second', () => {
   const hub = new DocumentHub('d');
-  const member: Member = { replica: 'a', send() {}, replace() {} };
+  const member: Member = { replica: 'a', send() {}, replace() {}, fail() {} };
   hub.join(member, 0);
   hub.submit(member, [
     { type: 'insert', id: { replica: 'a', counter: 1 }, origin: null, text: 'x'.repeat(10_000) },

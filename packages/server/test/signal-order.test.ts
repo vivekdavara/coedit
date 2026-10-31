@@ -6,6 +6,9 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
@@ -21,7 +24,11 @@ process.stdout.write = (chunk, ...rest) => {
 };
 `;
 
-test('the signal handlers are installed before the "listening" line is written', async () => {
+test('the signal handlers are installed before the "listening" line is written', async (t) => {
+  const data = fs.mkdtempSync(path.join(os.tmpdir(), 'coedit-test-'));
+  t.after(() => {
+    fs.rmSync(data, { recursive: true, force: true });
+  });
   const child = spawn(
     process.execPath,
     [
@@ -30,7 +37,7 @@ test('the signal handlers are installed before the "listening" line is written',
       MAIN,
     ],
     {
-      env: { PATH: process.env['PATH'] ?? '', COEDIT_PORT: '0' },
+      env: { PATH: process.env['PATH'] ?? '', COEDIT_PORT: '0', COEDIT_DATA: data },
       stdio: ['ignore', 'pipe', 'pipe'],
     },
   );

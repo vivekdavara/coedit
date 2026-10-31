@@ -20,12 +20,14 @@ import {
   encodeOp,
   encodeServerMessage,
   encodeServerOps,
+  encodeServerSnapshot,
   formatId,
   type Cursor,
   type ErrorCode,
   type Op,
   type Span,
 } from '@coedit/crdt';
+import { DocumentStore, StoreError, type StoreOptions } from './store.ts';
 
 /** A client joined to a hub. */
 export interface Member {
@@ -37,6 +39,8 @@ export interface Member {
   send(text: string, sent?: () => void): void;
   /** Ends the connection without an error message (a newer connection of the same replica replaced it). */
   replace(): void;
+  /** Sends the error and ends the connection (the hub can't go on: its storage failed). */
+  fail(refusal: Refusal): void;
 }
 
 /** Why the hub refused a join or an operation: the error message to send before closing the connection. */
@@ -48,6 +52,13 @@ export interface Refusal {
 export interface HubOptions {
   /** The server replica's capacity (Rga's); tests set it small. */
   readonly capacity?: number;
+  /**
+   * Where the document is kept: the directory holding one directory per document (DocumentStore), and whether to
+   * fsync. Without it the document lives in memory only and is lost when the server stops.
+   */
+  readonly store?: StoreOptions & { readonly root: string };
+  /** With a store: write a snapshot once this many entries have been logged since the last one (default 10,000). */
+  readonly snapshotEvery?: number;
 }
 
 interface MemberState {
@@ -55,6 +66,11 @@ interface MemberState {
   cursor: Cursor | null;
   /** The next log entry its catch-up sends; null once caught up and receiving live relays. */
   next: number | null;
+  /**
+   * A snapshot it gets before the log (it joined with a `have` older than the log kept): the operations, how many
+   * have been sent, and the entry it's the state after. Null once sent, or if it needs none.
+   */
+  snapshot: { readonly seq: number; readonly ops: readonly string[]; at: number } | null;
 }
 
 /** The server's replica id. It never makes an element, so it never names one. */
@@ -63,22 +79,89 @@ const SERVER_REPLICA = 'server';
 export class DocumentHub {
   readonly doc: string;
   readonly #rga: Rga;
-  /** The log: entry n (from 1) is `#log[n - 1]`, as encodeOp wrote it. */
-  readonly #log: string[] = [];
+  /**
+   * The log kept in memory: entry n is `#log[n - #base - 1]`, as encodeOp wrote it. With a store, entries before the
+   * previous snapshot are dropped, and #base is the last one dropped; a member that has applied less gets a snapshot.
+   */
+  #log: string[] = [];
+  #base = 0;
+  /** The entry the last snapshot written is the state after (0: none). */
+  #snapshotSeq = 0;
+  readonly #store: DocumentStore | null = null;
+  readonly #snapshotEvery: number;
+  /** Set when storing an entry failed: the replica holds operations the disk may not, so the hub must go. */
+  #broken = false;
   /** Joined members: each one's cursor, and where its catch-up has got to. */
   readonly #members = new Map<Member, MemberState>();
 
+  /**
+   * A hub for `doc`, with what its store holds if it has one: the newest snapshot applied, then the entries after
+   * it. Throws StoreError for a document whose files don't read back (or don't rebuild a valid document), and
+   * whatever the file system throws.
+   */
   constructor(doc: string, options: HubOptions = {}) {
     this.doc = doc;
     this.#rga = new Rga(
       SERVER_REPLICA,
       options.capacity === undefined ? {} : { capacity: options.capacity },
     );
+    this.#snapshotEvery = options.snapshotEvery ?? 10_000;
+    if (options.store === undefined) return;
+    const { store, loaded } = DocumentStore.open(options.store.root, doc, options.store);
+    try {
+      const rebuild = (texts: readonly string[], what: string, ready: boolean) => {
+        for (let i = 0; i < texts.length; i++) {
+          const op = JSON.parse(texts[i] as string) as Op;
+          if (ready && !this.#rga.ready(op)) {
+            throw new StoreError(
+              store.dir,
+              `${what} ${i + 1}: its dependencies aren't in the document`,
+            );
+          }
+          try {
+            this.#rga.apply(op);
+          } catch (error) {
+            throw new StoreError(store.dir, `${what} ${i + 1}: ${(error as Error).message}`);
+          }
+        }
+      };
+      const snapshot = loaded.snapshot;
+      if (snapshot !== null) {
+        rebuild(snapshot.ops, `the snapshot's operation`, false);
+        if (this.#rga.pending > 0) {
+          throw new StoreError(store.dir, "the snapshot's operations leave some waiting");
+        }
+        this.#snapshotSeq = snapshot.seq;
+      }
+      const skip = this.#snapshotSeq - loaded.first + 1;
+      rebuild(loaded.entries.slice(Math.max(0, skip)), 'log entry after the snapshot', true);
+    } catch (error) {
+      store.close();
+      throw error;
+    }
+    this.#store = store;
+    this.#log = [...loaded.entries];
+    this.#base = loaded.first - 1;
   }
 
   /** The last sequence number in the log (0 when it's empty). */
   get seq(): number {
-    return this.#log.length;
+    return this.#base + this.#log.length;
+  }
+
+  /** The oldest log entry kept, less one: a member that has applied less gets a snapshot instead of the log. */
+  get base(): number {
+    return this.#base;
+  }
+
+  /** Whether storing an entry failed: the hub refuses everything, and the server must drop it and load it again. */
+  get broken(): boolean {
+    return this.#broken;
+  }
+
+  /** Closes the store (the hub can't take operations after). */
+  close(): void {
+    this.#store?.close();
   }
 
   /** The document's text, as the server's replica holds it. */
@@ -102,10 +185,11 @@ export class DocumentHub {
    * noticed its old connection drop).
    */
   join(member: Member, have: number): Refusal | null {
-    if (have > this.#log.length) {
+    if (this.#broken) return failed();
+    if (have > this.seq) {
       return {
         code: 'ahead-of-server',
-        message: `you have applied ${have} log entries, but this server's log of ${this.doc} has ${this.#log.length}: it has lost entries you have (restarted without its data?)`,
+        message: `you have applied ${have} log entries, but this server's log of ${this.doc} has ${this.seq}: it has lost entries you have (restarted without its data?)`,
       };
     }
     for (const other of this.#members.keys()) {
@@ -119,10 +203,18 @@ export class DocumentHub {
         type: 'welcome',
         protocol: PROTOCOL_VERSION,
         doc: this.doc,
-        seq: this.#log.length,
+        seq: this.seq,
       }),
     );
-    const state: MemberState = { cursor: null, next: have + 1 };
+    // Too far behind for the log kept: the document as it is now, then the log from here on.
+    const state: MemberState =
+      have < this.#base
+        ? {
+            cursor: null,
+            next: this.seq + 1,
+            snapshot: { seq: this.seq, ops: this.#rga.snapshot().map(encodeOp), at: 0 },
+          }
+        : { cursor: null, next: have + 1, snapshot: null };
     this.#members.set(member, state);
     this.#catchUp(member, state);
     return null;
@@ -139,8 +231,16 @@ export class DocumentHub {
   #catchUp(member: Member, state: MemberState): void {
     for (;;) {
       if (this.#members.get(member) !== state) return; // left, or replaced
+      let text: string;
+      const snapshot = state.snapshot;
       const next = state.next as number;
-      if (next > this.#log.length) {
+      if (snapshot !== null) {
+        const end = batchEnd(snapshot.ops, snapshot.at);
+        const last = end === snapshot.ops.length;
+        text = encodeServerSnapshot(snapshot.seq, snapshot.ops.slice(snapshot.at, end), last);
+        snapshot.at = end;
+        if (last) state.snapshot = null;
+      } else if (next > this.seq) {
         state.next = null;
         for (const [other, { cursor }] of this.#members) {
           if (other !== member && cursor !== null) {
@@ -148,13 +248,16 @@ export class DocumentHub {
           }
         }
         return;
+      } else {
+        const start = next - this.#base - 1;
+        const batch = this.#log.slice(start, batchEnd(this.#log, start));
+        state.next = next + batch.length;
+        text = encodeServerOps(next, batch);
       }
-      const batch = this.#log.slice(next - 1, batchEnd(this.#log, next - 1));
-      state.next = next + batch.length;
       // Whether the send has called back yet, and whether this loop is still inside the send (a member that writes
       // synchronously calls back from within it: then the loop carries on, rather than recurse).
       const progress = { inside: true, written: false };
-      member.send(encodeServerOps(next, batch), () => {
+      member.send(text, () => {
         progress.written = true;
         if (!progress.inside) this.#catchUp(member, state);
       });
@@ -186,9 +289,10 @@ export class DocumentHub {
    * returned for the server to send before closing the connection.
    */
   submit(member: Member, ops: readonly Op[]): Refusal | null {
+    if (this.#broken) return failed();
     if (!this.#members.has(member))
       throw new Error(`${member.replica} isn't joined to ${this.doc}`);
-    const from = this.#log.length + 1;
+    const from = this.seq + 1;
     let refusal: Refusal | null = null;
     // Ids named by this message's deletes so far. The overlap rule bounds one delete's cost by the document's size,
     // but a message carries up to 1,000 deletes, which could each name the whole document: 3.9 s for one message of a
@@ -227,13 +331,70 @@ export class DocumentHub {
         break;
       }
     }
+    const added = this.#log.slice(from - this.#base - 1);
+    // On disk before anyone sees them: whatever a client has applied, the server has kept.
+    if (this.#store !== null && added.length > 0) {
+      try {
+        this.#store.append(from, added);
+      } catch (error) {
+        return this.#fail(error, member);
+      }
+    }
     let next = from;
-    for (const batch of batchOps(this.#log.slice(from - 1))) {
+    for (const batch of batchOps(added)) {
       const text = encodeServerOps(next, batch);
       // A member still catching up gets these from the log, in order, when its catch-up reaches them.
       for (const [other, state] of this.#members) if (state.next === null) other.send(text);
       next += batch.length;
     }
+    if (this.#store !== null && this.seq - this.#snapshotSeq >= this.#snapshotEvery) {
+      this.#takeSnapshot(this.#store);
+    }
+    return refusal;
+  }
+
+  /**
+   * Writes a snapshot after the last entry, and drops the entries before the previous snapshot from disk and from
+   * memory, except those a member still catching up hasn't been sent. A snapshot that fails to write loses
+   * nothing (the log has every entry), so the hub goes on.
+   */
+  #takeSnapshot(store: DocumentStore): void {
+    let keepFrom = this.#snapshotSeq + 1;
+    for (const { next } of this.#members.values()) {
+      if (next !== null) keepFrom = Math.min(keepFrom, next);
+    }
+    try {
+      store.snapshot(this.#rga.snapshot().map(encodeOp), keepFrom);
+    } catch (error) {
+      console.error(`coedit: writing a snapshot of ${this.doc} failed`, error);
+      return;
+    }
+    this.#snapshotSeq = this.seq;
+    const drop = keepFrom - 1 - this.#base;
+    if (drop > 0) {
+      this.#log = this.#log.slice(drop);
+      this.#base += drop;
+    }
+  }
+
+  /**
+   * Storing entries failed (a full disk): they're applied to the replica but may not be on disk, and they haven't
+   * been relayed. The hub can't go on without the disk and the replica disagreeing, so it closes the store and
+   * every member's connection (`server-error`, which clients retry); the server drops it, and the next join loads the
+   * document again from what reached the disk. The sender keeps the operations in its outbox and resends them.
+   */
+  #fail(error: unknown, sender: Member): Refusal {
+    this.#broken = true;
+    console.error(`coedit: storing log entries of ${this.doc} failed; closing it`, error);
+    try {
+      this.#store?.close();
+    } catch {
+      // Already failing; the store's file descriptor goes with the process at worst.
+    }
+    const refusal = failed();
+    const members = [...this.#members.keys()];
+    this.#members.clear();
+    for (const other of members) if (other !== sender) other.fail(refusal);
     return refusal;
   }
 
@@ -296,6 +457,13 @@ function overlapping(spans: readonly Span[]): boolean {
       return true;
   }
   return false;
+}
+
+function failed(): Refusal {
+  return {
+    code: 'server-error',
+    message: "the server couldn't store this document's log: reconnect to load it again",
+  };
 }
 
 function refused(index: number, problem: string, code: ErrorCode = 'refused-op'): Refusal {

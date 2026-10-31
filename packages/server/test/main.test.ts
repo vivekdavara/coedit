@@ -2,7 +2,10 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
+import fs from 'node:fs';
 import { createServer } from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, test, type TestContext } from 'node:test';
 import { WebSocket } from 'ws';
@@ -17,13 +20,23 @@ interface Run {
   exit: Promise<number | null>;
 }
 
+/** A new empty directory, removed when the test ends. */
+function tempDir(t: TestContext): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'coedit-test-'));
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  return dir;
+}
+
 /**
- * Starts main.ts. The child is killed when the test ends, however it ends: a failed assertion before the test's own
- * kill would otherwise leave it listening and the test file waiting on it (review 2 saw both).
+ * Starts main.ts, with its documents in a new directory unless `env` sets COEDIT_DATA. The child is killed when the
+ * test ends, however it ends: a failed assertion before the test's own kill would otherwise leave it listening and
+ * the test file waiting on it (review 2 saw both).
  */
 function start(t: TestContext, env: Record<string, string>): Run {
   const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', MAIN], {
-    env: { PATH: process.env['PATH'] ?? '', ...env },
+    env: { PATH: process.env['PATH'] ?? '', COEDIT_DATA: tempDir(t), ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let out = '';
@@ -143,6 +156,21 @@ describe('main', () => {
     assert.equal(await status('http://localhost:5173'), 403);
     run.child.kill('SIGTERM');
     assert.equal(await run.exit, 0);
+  });
+
+  test('refuses an empty COEDIT_DATA with exit 2', async (t) => {
+    const run = start(t, { COEDIT_DATA: '', COEDIT_PORT: '0' });
+    assert.equal(await run.exit, 2);
+    assert.match(run.stderr(), /COEDIT_DATA must not be empty/);
+  });
+
+  test('says where it keeps documents, before the "listening" line', async (t) => {
+    const data = tempDir(t);
+    const run = start(t, { COEDIT_DATA: data, COEDIT_PORT: '0' });
+    await listening(run);
+    const out = run.stdout();
+    const kept = out.indexOf(`keeps documents in ${data}\n`);
+    assert.ok(kept >= 0 && kept < out.indexOf('listening on'), out);
   });
 
   test('refuses an empty COEDIT_HOST, which Node would read as every interface', async (t) => {

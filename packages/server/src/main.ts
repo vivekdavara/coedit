@@ -1,6 +1,8 @@
 // The server's command line: `npm start -w @coedit/server`. Settings come from the environment:
-// COEDIT_HOST (default 127.0.0.1), COEDIT_PORT (default 8110), and COEDIT_ORIGINS (the web origins whose pages may
-// connect, separated by commas; default the client's dev server, http://localhost:5173 and http://127.0.0.1:5173).
+// COEDIT_HOST (default 127.0.0.1), COEDIT_PORT (default 8110), COEDIT_ORIGINS (the web origins whose pages may
+// connect, separated by commas; default the client's dev server, http://localhost:5173 and http://127.0.0.1:5173), and
+// COEDIT_DATA (the directory documents are kept in; default `data` in the working directory, which for
+// `npm start -w @coedit/server` is packages/server/data).
 import {
   DEFAULT_HOST,
   DEFAULT_ORIGINS,
@@ -8,6 +10,7 @@ import {
   startServer,
   type SyncServer,
 } from './server.ts';
+import path from 'node:path';
 import { hostPort, parseOrigins, parsePort } from './config.ts';
 
 const host = process.env['COEDIT_HOST'] ?? DEFAULT_HOST;
@@ -34,9 +37,15 @@ if (origins === undefined) {
   process.exit(2);
 }
 
+const dataDir = process.env['COEDIT_DATA'] ?? 'data';
+if (dataDir === '') {
+  console.error('COEDIT_DATA must not be empty (unset it for ./data)');
+  process.exit(2);
+}
+
 let server: SyncServer;
 try {
-  server = await startServer({ host, port, origins });
+  server = await startServer({ host, port, origins, dataDir });
 } catch (error) {
   console.error(`can't listen on ${hostPort(host, port)}: ${(error as Error).message}`);
   process.exit(1);
@@ -62,4 +71,5 @@ const stop = (signal: NodeJS.Signals) => {
 // its handler is installed gets the default action, which kills the process (the SIGTERM test saw it under load).
 process.on('SIGINT', stop);
 process.on('SIGTERM', stop);
+console.log(`coedit server keeps documents in ${path.resolve(dataDir)}`);
 console.log(`coedit server listening on http://${hostPort(server.host, server.port)}`);

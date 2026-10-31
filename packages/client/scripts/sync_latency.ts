@@ -11,6 +11,9 @@
 // the machine slept during the run (performance.now() stops in sleep on macOS, Date.now() doesn't), and refuses
 // to print numbers if it did.
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SyncClient } from '../src/sync.ts';
 
@@ -22,8 +25,13 @@ if (![readers, edits, interval].every((n) => Number.isFinite(n) && n >= 0) || ed
 }
 
 const MAIN = fileURLToPath(new URL('../../server/src/main.ts', import.meta.url));
+// Documents in a new directory, removed at the end: each run starts from an empty document.
+const data = fs.mkdtempSync(path.join(os.tmpdir(), 'coedit-latency-'));
+process.on('exit', () => {
+  fs.rmSync(data, { recursive: true, force: true });
+});
 const server = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', MAIN], {
-  env: { PATH: process.env['PATH'] ?? '', COEDIT_PORT: '0' },
+  env: { PATH: process.env['PATH'] ?? '', COEDIT_PORT: '0', COEDIT_DATA: data },
   stdio: ['ignore', 'pipe', 'inherit'],
 });
 const address = await new Promise<string>((resolve, reject) => {

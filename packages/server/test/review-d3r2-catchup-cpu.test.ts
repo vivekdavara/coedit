@@ -19,7 +19,7 @@ import { DocumentHub, type Member } from '../src/hub.ts';
 
 test("a catch-up's work is in proportion to what it sends", () => {
   const hub = new DocumentHub('d');
-  const writer: Member = { replica: 'w', send() {}, replace() {} };
+  const writer: Member = { replica: 'w', send() {}, replace() {}, fail() {} };
   hub.join(writer, 0);
   hub.submit(writer, [insertOf()]);
   // Ten deletes of about 40 KB a message, naming 10,000 different ids: the server refuses a message whose deletes
@@ -54,6 +54,7 @@ test("a catch-up's work is in proportion to what it sends", () => {
       sent?.();
     },
     replace() {},
+    fail() {},
   };
   start = performance.now();
   hub.join(reader, 0);

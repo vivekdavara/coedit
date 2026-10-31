@@ -12,7 +12,7 @@ import {
   type Op,
   type ServerMessage,
 } from '@coedit/crdt';
-import { DocumentHub, truncate, type Member } from '../src/hub.ts';
+import { DocumentHub, truncate, type Member, type Refusal } from '../src/hub.ts';
 
 class FakeMember implements Member {
   readonly replica: string;
@@ -30,6 +30,12 @@ class FakeMember implements Member {
 
   replace(): void {
     this.replaced = true;
+  }
+
+  failed: Refusal | null = null;
+
+  fail(refusal: Refusal): void {
+    this.failed = refusal;
   }
 
   /** Every message received so far, decoded (each must decode), and forgets them. */
