@@ -192,6 +192,45 @@ describe('operations', () => {
     assert.doesNotMatch(hub.state(), /deleted ahead \S/);
   });
 
+  test('refuses a delete whose spans overlap, in any order; adjacent spans and other replicas are fine', () => {
+    const hub = new DocumentHub('d');
+    const a = joined(hub, 'a');
+    assert.equal(
+      hub.submit(a, [insert(1, 'a', null, 'abcdef'), insert(7, 'b', [6, 'a'], 'xyz')]),
+      null,
+    );
+    for (const spans of [
+      [
+        [1, 'a', 2],
+        [1, 'a', 2],
+      ],
+      [
+        [1, 'a', 3],
+        [3, 'a', 1],
+      ],
+      [
+        [4, 'a', 2],
+        [1, 'a', 4],
+      ],
+      [
+        [7, 'b', 1],
+        [1, 'a', 1],
+        [8, 'b', 2],
+        [8, 'b', 1],
+      ],
+    ] as [number, string, number][][]) {
+      const refusal = hub.submit(a, [del(...spans)]);
+      assert.deepEqual(
+        refusal,
+        { code: 'refused-op', message: 'ops[0] refused: its spans overlap' },
+        JSON.stringify(spans),
+      );
+    }
+    assert.equal(hub.text(), 'abcdefxyz');
+    assert.equal(hub.submit(a, [del([3, 'a', 2], [1, 'a', 2], [7, 'b', 1], [8, 'b', 1])]), null);
+    assert.equal(hub.text(), 'efz');
+  });
+
   test('refuses an insert reusing an id with other content', () => {
     const hub = new DocumentHub('d');
     const a = joined(hub, 'a');

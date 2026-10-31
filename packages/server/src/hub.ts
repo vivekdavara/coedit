@@ -23,6 +23,7 @@ import {
   type Cursor,
   type ErrorCode,
   type Op,
+  type Span,
 } from '@coedit/crdt';
 
 /** A client joined to a hub. */
@@ -181,6 +182,12 @@ export class DocumentHub {
   /** Why the server can't accept `op` now, or null. */
   #check(op: Op): string | null {
     const rga = this.#rga;
+    // Applying a delete costs a lookup per id named, and the wire format lets all 1,000 spans name the same 10,000
+    // ids: 10 million lookups for one 43 KB operation, and 23 of those in one message kept the server from every
+    // other client for about 5 s (review of day 3). No replica writes overlapping spans (Rga.edit's are disjoint).
+    // Without overlaps every id named is a distinct element placed here, so a delete's cost is bounded by the
+    // document's size.
+    if (op.type === 'delete' && overlapping(op.spans)) return 'its spans overlap';
     if (!rga.ready(op)) {
       return op.type === 'insert'
         ? `its origin ${formatId(op.origin)} isn't an element of this document`
@@ -209,6 +216,20 @@ export class DocumentHub {
     const text = encodeServerMessage({ type: 'presence', replica: member.replica, cursor });
     for (const other of this.#members.keys()) if (other !== member) other.send(text);
   }
+}
+
+/** Whether two of the spans name the same id. */
+function overlapping(spans: readonly Span[]): boolean {
+  const sorted = [...spans].sort((a, b) =>
+    a.replica === b.replica ? a.counter - b.counter : a.replica < b.replica ? -1 : 1,
+  );
+  for (let i = 1; i < sorted.length; i++) {
+    const before = sorted[i - 1] as Span;
+    const span = sorted[i] as Span;
+    if (before.replica === span.replica && span.counter - before.counter < before.length)
+      return true;
+  }
+  return false;
 }
 
 function refused(index: number, problem: string, code: ErrorCode = 'refused-op'): Refusal {
