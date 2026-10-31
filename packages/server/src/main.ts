@@ -41,8 +41,6 @@ try {
   console.error(`can't listen on ${hostPort(host, port)}: ${(error as Error).message}`);
   process.exit(1);
 }
-console.log(`coedit server listening on http://${hostPort(server.host, server.port)}`);
-
 let stopping = false;
 const stop = (signal: NodeJS.Signals) => {
   if (stopping) {
@@ -60,5 +58,8 @@ const stop = (signal: NodeJS.Signals) => {
     },
   );
 };
+// Before the "listening" line, not after: whoever reads that line may signal at once, and a signal arriving before
+// its handler is installed gets the default action, which kills the process (the SIGTERM test saw it under load).
 process.on('SIGINT', stop);
 process.on('SIGTERM', stop);
+console.log(`coedit server listening on http://${hostPort(server.host, server.port)}`);
