@@ -14,20 +14,25 @@ export function hostPort(host: string, port: number): string {
 }
 
 /**
- * Reads COEDIT_ORIGINS: web origins separated by commas, each `http://` or `https://`, a host, an optional port
- * (1 to 65535, no leading zeros), and nothing after it (an origin has no path; a browser sends
- * `http://localhost:5173`, never with a slash). Hosts in lower case only: a browser sends the host lower-cased, so
- * `http://LOCALHOST:5173` could never match (review of day 3). Spaces around the commas are allowed; an empty
- * setting allows no browser page at all. Returns undefined for anything else, rather than guess.
+ * Reads COEDIT_ORIGINS: web origins separated by commas, each `http://` or `https://`, a host, an optional port, and
+ * nothing after it (an origin has no path; a browser sends `http://localhost:5173`, never with a slash). Each must be
+ * written the way a browser sends it, which is what `new URL(origin).origin` gives back: lower case, no default port
+ * (`http://localhost`, not `:80`), IPv6 compressed (`[::1]`), IPv4 in full (`127.0.0.1`, not `127.1`). Any other
+ * spelling could never match, so the page would get 403 with no hint why (reviews 1 and 2 of day 3). Spaces around
+ * the commas are allowed; an empty setting allows no browser page at all. Returns undefined for anything else, rather
+ * than guess.
  */
 export function parseOrigins(text: string): string[] | undefined {
   if (text.trim() === '') return [];
   const origins = text.split(',').map((part) => part.trim());
   const valid = origins.every((origin) => {
-    const match = /^https?:\/\/(?:[a-z0-9.-]+|\[[0-9a-f:.]+\])(?::([1-9][0-9]{0,4}))?$/.exec(
-      origin,
-    );
-    return match !== null && (match[1] === undefined || Number(match[1]) <= 65535);
+    if (!/^https?:\/\/[^/?#@\s]+$/.test(origin)) return false;
+    try {
+      const url = new URL(origin);
+      return url.origin === origin && url.port !== '0';
+    } catch {
+      return false;
+    }
   });
   return valid ? origins : undefined;
 }
