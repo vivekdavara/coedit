@@ -51,6 +51,8 @@ export interface SyncEvents {
   onStatus?(status: Status, detail: string): void;
   /** Someone's cursor moved, appeared or went (call remoteSelections for where they are now). */
   onPresence?(): void;
+  /** Log entries were applied or echoes acknowledged: `seq` and `unacknowledged` may have changed. */
+  onProgress?(): void;
 }
 
 /** The parts of the browser's WebSocket the client uses; tests and Node pass their own. */
@@ -337,6 +339,7 @@ export class SyncClient {
         if (changes.length > 0) this.#events.onChanges?.(changes);
         if (!this.#live && this.#seq >= this.#target) this.#goLive();
         if (this.#remote.size > 0) this.#events.onPresence?.();
+        this.#events.onProgress?.();
         return;
       }
       case 'presence': {

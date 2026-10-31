@@ -59,7 +59,9 @@ class FakeSocket implements SocketLike {
 }
 
 /** A client whose sockets are FakeSockets (the latest in `sockets.at(-1)`) and whose retries are immediate. */
-function setup(events: { statuses?: [Status, string][]; changes?: unknown[][] } = {}) {
+function setup(
+  events: { statuses?: [Status, string][]; changes?: unknown[][]; onProgress?: () => void } = {},
+) {
   const sockets: FakeSocket[] = [];
   const client = new SyncClient(
     {
@@ -77,6 +79,7 @@ function setup(events: { statuses?: [Status, string][]; changes?: unknown[][] } 
     {
       onStatus: (status, detail) => events.statuses?.push([status, detail]),
       onChanges: (changes) => events.changes?.push([...changes]),
+      onProgress: () => events.onProgress?.(),
     },
   );
   const latest = () => sockets.at(-1) as FakeSocket;
@@ -152,7 +155,8 @@ describe('the outbox', () => {
 
   test("leaves the outbox when the server echoes it, in order, and an echo isn't applied twice", () => {
     const changes: unknown[][] = [];
-    const { client, latest } = setup({ changes });
+    const { client, latest } = setup({ changes, onProgress: () => progress++ });
+    let progress = 0;
     client.start();
     latest().open();
     latest().receive(welcome(0));
@@ -167,6 +171,7 @@ describe('the outbox', () => {
     latest().receive({ type: 'ops', from: 2, ops: [sent[1] as Op] });
     assert.equal(client.unacknowledged, 0);
     assert.deepEqual(changes, [], 'echoes change nothing');
+    assert.equal(progress, 2, 'but each is progress');
     assert.equal(client.rga.text(), 'abc');
   });
 
