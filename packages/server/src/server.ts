@@ -283,6 +283,12 @@ function rawText(data: RawData): string {
 
 /** Answers a handshake the server won't take with a plain HTTP status, and ends the socket. */
 function refuseUpgrade(socket: Socket, status: number, reason: string): void {
+  // Node's HTTP server takes its own 'error' listener off the socket before it emits 'upgrade'. Without one, a
+  // client that resets the connection while the answer is written (EPIPE, ECONNRESET) makes the socket emit an
+  // error nothing handles, and Node throws it: the whole server exits (review of day 3).
+  socket.on('error', () => {
+    socket.destroy();
+  });
   socket.end(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
 }
 
