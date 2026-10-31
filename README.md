@@ -7,15 +7,19 @@ Several people edit one document at once, each in their own tab; edits merge wit
 every replica applies the same commuting operations. Built to be explained end to end: one ordering rule with a short
 proof, a strict wire format, and a test harness that is itself tested.
 
-**Status: day 3 of 5.** Done: the design for all five days (DESIGN.md), the workspaces and CI, the wire format with a
+**Status: day 4 of 5.** Done: the design for all five days (DESIGN.md), the workspaces and CI, the wire format with a
 strict decoder, the network simulator for convergence tests and its self-test, the client's mapping from textarea
 input to edits (day 1); the CRDT itself: RGA with Lamport ids, runs placed by the skip rule, tombstones, operations in
 any order, conflicts refused, positions as ids for presence, all property-tested for convergence (day 2); and sync:
 the WebSocket server with one hub per document (a numbered log, the echo as acknowledgement, refusing what it can't
 place or what would use up the clocks), the sync client (an outbox, catch-up then resend on reconnect, backoff), the
 React editor patching remote changes into the textarea with the caret kept in place, remote cursors, offline editing,
-and convergence tested end to end on the real server (day 3). Next: persistence and tombstone collection, Playwright
-with two browsers (day 4), release (day 5).
+and convergence tested end to end on the real server (day 3); persistence: an op log appended (and fsynced) before
+anything is relayed, snapshots that are lists of ordinary operations, recovery that drops a torn last line and refuses
+anything else it can't read back, snapshots sent to clients too far behind the log, idle documents unloaded;
+Playwright with two browsers editing at once and offline; and measurements of the CRDT's speed, a document's growth,
+and what storage costs (day 4). Tombstone collection was designed on day 4 but not built (DESIGN.md "Tombstones").
+Next: release (day 5).
 
 ## Architecture
 
@@ -35,30 +39,33 @@ flowchart LR
 
 The server orders operations into a numbered log and relays each to every client, the sender included (the echo is
 the acknowledgement). It applies every operation to its own replica first, so it refuses what would split replicas
-apart, and it accepts only operations whose dependencies it has placed, so its log is in causal order. Built so far:
-everything but the op log and snapshots on disk (day 4); until then a server restart loses its documents, and
-clients that held them stop with `ahead-of-server` rather than guess.
+apart, and it accepts only operations whose dependencies it has placed, so its log is in causal order. Each document's
+log and snapshots are on disk (one directory per document); an entry is written before anyone sees it, so a restart
+or a crash never leaves a client ahead of the server.
 
 ## Layout
 
-| Path                              | What                                                                      |
-| --------------------------------- | ------------------------------------------------------------------------- |
-| `DESIGN.md`                       | the specification: RGA and why it converges, wire format, sync protocol   |
-| `packages/crdt/src/rga.ts`        | the CRDT: insert, delete, waiting operations, conflicts, presence         |
-| `packages/crdt/src/ids.ts`        | the id order (counter, then replica by code unit) and a map keyed by ids  |
-| `packages/crdt/src/json.ts`       | a strict JSON reader (duplicate keys, lone surrogates, rounding: refused) |
-| `packages/crdt/src/protocol.ts`   | operations and protocol messages; strict decoder, canonical encoder       |
-| `packages/crdt/test/harness/`     | the network simulator, the toy CRDTs that test it, the RGA as a subject   |
-| `test/`                           | repo-wide checks: the docs against the code, the workspace exports        |
-| `packages/crdt/scripts/`          | `harness-stats`, `bench-codec`, `deep-convergence`, `worst-delete`        |
-| `packages/server/src/hub.ts`      | one document: the server's replica, the numbered log, members, presence   |
-| `packages/server/src/server.ts`   | HTTP (`/healthz`) and the `/sync` WebSocket: sessions, origins, heartbeat |
-| `packages/server/src/main.ts`     | the command line (`COEDIT_HOST`, `COEDIT_PORT`, `COEDIT_ORIGINS`)         |
-| `packages/client/src/sync.ts`     | the sync client: replica, outbox, echo matching, reconnect, presence      |
-| `packages/client/src/edit.ts`     | textarea before/after + caret to one edit, in code points                 |
-| `packages/client/src/textarea.ts` | remote changes applied to the textarea's text and selection               |
-| `packages/client/src/App.tsx`     | the editor: textarea, remote cursors, status, offline switch              |
-| `packages/client/scripts/`        | `sync-latency`: edit to acknowledgement and to other clients, loopback    |
+| Path                              | What                                                                             |
+| --------------------------------- | -------------------------------------------------------------------------------- |
+| `DESIGN.md`                       | the specification: RGA and why it converges, wire format, sync protocol          |
+| `packages/crdt/src/rga.ts`        | the CRDT: insert, delete, waiting operations, conflicts, presence                |
+| `packages/crdt/src/ids.ts`        | the id order (counter, then replica by code unit) and a map keyed by ids         |
+| `packages/crdt/src/json.ts`       | a strict JSON reader (duplicate keys, lone surrogates, rounding: refused)        |
+| `packages/crdt/src/protocol.ts`   | operations and protocol messages; strict decoder, canonical encoder              |
+| `packages/crdt/test/harness/`     | the network simulator, the toy CRDTs that test it, the RGA as a subject          |
+| `test/`                           | repo-wide checks: the docs against the code, the workspace exports               |
+| `packages/crdt/scripts/`          | `harness-stats`, `bench-codec`, `deep-convergence`, `worst-delete`, `editing`    |
+| `packages/server/src/hub.ts`      | one document: the server's replica, the numbered log, members, presence          |
+| `packages/server/src/store.ts`    | a document on disk: log segments, snapshots, recovery from a crash               |
+| `packages/server/scripts/`        | `storage`: append cost with and without fsync, load from log and snapshot        |
+| `packages/client/e2e/`            | Playwright: two browsers editing one document, offline and back                  |
+| `packages/server/src/server.ts`   | HTTP (`/healthz`) and the `/sync` WebSocket: sessions, origins, heartbeat        |
+| `packages/server/src/main.ts`     | the command line (`COEDIT_HOST`, `COEDIT_PORT`, `COEDIT_ORIGINS`, `COEDIT_DATA`) |
+| `packages/client/src/sync.ts`     | the sync client: replica, outbox, echo matching, reconnect, presence             |
+| `packages/client/src/edit.ts`     | textarea before/after + caret to one edit, in code points                        |
+| `packages/client/src/textarea.ts` | remote changes applied to the textarea's text and selection                      |
+| `packages/client/src/App.tsx`     | the editor: textarea, remote cursors, status, offline switch                     |
+| `packages/client/scripts/`        | `sync-latency`: edit to acknowledgement and to other clients, loopback           |
 
 ## How to run
 
@@ -88,6 +95,76 @@ two tabs (or two browsers) and type in both. The dev server passes `/sync` on to
 (`COEDIT_SYNC_TARGET`, default `ws://127.0.0.1:8110`). "Go offline" closes the connection: edits made meanwhile wait
 in the outbox and merge when it's pressed again. Each tab is a new replica, so a reload starts from the server's log
 (edits not yet acknowledged are lost with the tab).
+
+Documents are kept in `COEDIT_DATA` (default `data` in the server's working directory, which for the command above is
+`packages/server/`, gitignored): stop the server, start it again, and the tabs reconnect where they were. The
+end-to-end tests start both servers themselves, on the same ports (so stop yours first), and drive the installed
+Chrome:
+
+```bash
+npm run e2e -w @coedit/client
+```
+
+The day-4 measurements:
+
+```bash
+npm run editing -w @coedit/crdt
+```
+
+```bash
+npm run storage -w @coedit/server
+```
+
+## Results (day 4)
+
+Measured on the Apple M3 (macOS 26.6.2, Node 23.11.0), **on battery** (44% at 15:01, 33% at 15:31), nothing else of
+mine running unless said. The editing session is synthetic (a seeded random model of typing, not a recorded trace).
+
+- **The CRDT over a 100,000-edit session** (`npm run editing -w @coedit/crdt`, seed 1, 129.7 s in all, at `97e88cd`):
+  70,294 characters typed, 14,935 backspaces, 4,957 caret moves, 3,801 selections deleted, 1,021 pastes of 20 to 500
+  characters, 4,992 words; 95,043 operations.
+
+  | Tenth of the session | Local edits/s | Visible at its end | Elements at its end |
+  | -------------------: | ------------: | -----------------: | ------------------: |
+  |                    1 |        21,357 |             32,709 |              43,540 |
+  |                    3 |         5,408 |             79,872 |             113,250 |
+  |                    5 |         3,093 |            133,000 |             188,817 |
+  |                    7 |         2,051 |            183,101 |             261,989 |
+  |                   10 |         1,462 |            256,466 |             368,852 |
+
+  Every operation scans the element array from the start, so the rate falls with the document's size (tombstones
+  included): fine for one person typing, slow for large documents. A second replica applying all 95,043 operations
+  in order: 3,338 a second (28.5 s), and 3,425 a second from JSON text through the strict decoder (27.8 s): the
+  decoder isn't the cost, placement is. A 100,000-character paste into the middle: 20.5 ms locally, 24.0 ms remotely
+  (10 operations). At the end (the paste deleted again): 256,466 visible characters, 468,852 elements, **45.3%
+  tombstones**; a snapshot of 10,333,000 bytes (40.3 per visible character, 76,336 operations) against a session log
+  of 12,777,386 (49.8). At 20,000 edits (seed 1, `npm run editing -w @coedit/crdt -- 20000`): 50,240 edits/s in the
+  first tenth falling to 8,006, 69.4% tombstones, and a replica rebuilt from the snapshot takes 186 bytes of heap per
+  element (the mean of three kept at once, at `f89e5c0`; the first version of the script measured one copy and printed
+  a negative size at 100,000 edits).
+
+- **What storage costs** (`npm run storage -w @coedit/server`, at `477dd82`'s script, its first run): 2,000
+  one-character messages submitted one after another:
+
+  | Hub                       | Messages/s | submit p50 | submit p99 | max (ms) |
+  | ------------------------- | ---------: | ---------: | ---------: | -------: |
+  | in memory only            |     92,509 |   0.004 ms |   0.013 ms |     0.30 |
+  | store, no fsync           |     78,051 |   0.006 ms |   0.014 ms |     0.25 |
+  | store, fsync each message |        337 |   2.965 ms |   4.041 ms |     26.7 |
+
+  On macOS Node's fsync is `F_FULLFSYNC` (it waits for the drive), so durable acknowledgements cap one server at
+  about 340 messages a second; group commit would lift that (not built). A document of 100,000 log entries (11,964,458
+  bytes; one-character inserts, every sixth entry a backspace): opened from its log alone in 7,235 ms, a snapshot of it
+  written in 143 ms (9,609,593 bytes, with fsync), opened from the snapshot in 6,137 ms. The snapshot barely helps,
+  because each of its runs is placed by the same scan: loading is the array's O(n) placement done n times, and it
+  blocks the server's event loop while it runs.
+
+- **Two browsers** (`npm run e2e -w @coedit/client`): 4 Playwright tests, 4.6 s here; CI runs them in a job of their
+  own on the runner's Chrome.
+- **A SIGKILL while a client types** (`packages/server/test/crash.test.ts`): three rounds of 300 characters sent one
+  a message, the server killed after 100 echoes and started again on the same directory; every round the restarted
+  log held at least every echoed entry, and the next round's reader found the log exactly a prefix of what was typed.
+- **Tests**: 382 at the start of the day (`6484624`, `npm test`), 443 at `477dd82`.
 
 ## Results (day 3)
 
@@ -266,6 +343,24 @@ Measured on an Apple M3 (macOS 26.6.2, Node 23.11.0, on AC, awake throughout). A
 - `test/docs.test.ts` (parsing in `test/docs.ts`): every npm script, workspace, repo path and `:line` the docs name
   exists, and the ports and response they quote are the code's; the parser is also tested on twelve bad fragments.
   `test/exports.test.ts`: every workspace export imports.
+- `packages/crdt/test/rga-snapshot.test.ts` (day 4): a snapshot rebuilds the same state, merges into a replica holding
+  any causal prefix of the log or edits the source never saw, writes runs whole with origins first, splits long
+  tombstone lists, and returns copies.
+- `packages/server/test/store.test.ts` (day 4): appends read back after reopening; a torn tail (half a line, a line
+  without its newline, a code point cut in two) dropped and the file truncated; every other kind of damage refused
+  (a bad line, numbering, extra keys, a refused operation, an empty line, bytes that aren't UTF-8, a gap between
+  segments, a log not starting at 1, a snapshot short of its count or after the log); snapshots pruning what they
+  should; case-differing names in two directories.
+- `packages/server/test/persistence.test.ts` and `server-persistence.test.ts` (day 4): an entry on disk before the
+  relay (read from the file inside the relay); a new hub or server on the same directory is the same document and
+  catches up any `have`; snapshots to members too far behind, in parts within 1 MiB; entries a stuck member needs
+  kept; a failed write (ENOSPC, all of it or half) closing everyone and the next load holding only what reached the
+  disk; idle unloading, a refused hello not keeping a document loaded, a corrupt document refused while others are
+  served. `crash.test.ts`: SIGKILL while typing, three times. `scripts.test.ts`: the storage script's output adds up.
+- `packages/client/test/sync-unit.test.ts`, "a snapshot" (day 4): merged and reported, in parts, the outbox
+  acknowledged by what the snapshot holds (a delete only when all of it is there), each out-of-place snapshot
+  stopping the client, a dropped connection mid-snapshot, held during IME composition.
+- `packages/client/e2e/two-browsers.spec.ts` (day 4): see Results.
 - `review1-*.test.ts`, `review2-*.test.ts`: the reviews' findings, each of which failed before its fix.
 
 ## Review of day 3
@@ -441,6 +536,27 @@ one rule and short proof; code points as elements; any delivery order, with pend
 delivery; a strict reader because `JSON.parse` lets two replicas read one message differently; the server's echo as
 the acknowledgement; Node's type stripping and test runner rather than a build step (and Vitest 5 and ESLint 10 don't
 support this machine's Node 23).
+
+## Limitations (day 4)
+
+- **Tombstones are never collected.** 45% of the elements at the end of the synthetic 100,000-edit session, at about
+  186 bytes of heap each. DESIGN.md "Tombstones" has the rule that makes removing one safe and what knowing it's safe
+  needs (an "applied up to" message, a retention window, a resync for clients returning past it); none of it is built.
+- **The element array is scanned for every operation**: 1,462 local edits a second at 369,000 elements, and loading a
+  document of 100,000 entries takes 6 to 7 s whether from the log or a snapshot, with the server's event loop blocked
+  for all of it (every client of every document waits). A tree or blocks of elements with counts would fix both.
+- **Durable acknowledgements cost an fsync a message**: about 340 messages a second per server on this Mac. Each
+  message's entries are one write and one fsync; there's no group commit.
+- **One server per data directory.** Nothing locks it: two servers on one directory would interleave appends.
+- **No checksums.** Each stored line is checked as the wire format checks a message, which catches a torn or garbled
+  line, not a character changed into another valid one.
+- **A snapshot is written inside the message that reaches the interval** (143 ms at 67,000 characters with fsync),
+  and the client too far behind gets the whole document as operations, which it places at the same O(n) cost.
+- **Deletes are still logged every time they arrive**, so a client can grow a document's log by repeating deletes;
+  the log now lives on disk, and only the entries since the previous snapshot are kept, but each repeat is an entry.
+  Documents without a data directory (the tests') stay in memory for the server's lifetime.
+- Still true from day 3: nothing is authenticated; a refused operation stops that client; the outbox lives in memory;
+  the cursor mirror approximates the textarea's layout.
 
 ## Limitations (day 3)
 
