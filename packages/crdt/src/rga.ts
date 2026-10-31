@@ -540,6 +540,35 @@ export class Rga {
   }
 
   /**
+   * Operations that rebuild this replica's state (DESIGN.md "Persistence"): every run's insert as it arrived, in the
+   * order of the run's first element in the sequence, then deletes of the tombstones. Every element comes after its
+   * origin in the sequence, so each insert's origin is placed by an earlier one, and applying the inserts in any
+   * order whose origins come first gives the same sequence (that's the CRDT's convergence). Applied to a new replica
+   * they give this replica's `state()`; applied to one holding some of the operations this replica has applied,
+   * they bring it to everything this replica has. The inserts are the original runs, not the stretches the
+   * sequence now shows, since a run's middle sent as a run of its own would be a conflict. Throws for a replica
+   * holding waiting operations, which have no place to be written at (the server never holds any).
+   */
+  snapshot(): Op[] {
+    if (this.pending > 0) throw new Error(`${this.pending} operations are waiting: no snapshot`);
+    const ops: Op[] = [];
+    const runs = new Set<Run>();
+    const tombstones: Element[] = [];
+    for (const e of this.#elements) {
+      if (!runs.has(e.run)) {
+        runs.add(e.run);
+        ops.push(validateOp(e.run.op));
+      }
+      if (e.deleted) tombstones.push(e);
+    }
+    const spans = spansOf(tombstones);
+    for (let i = 0; i < spans.length; i += MAX_SPANS) {
+      ops.push({ type: 'delete', spans: spans.slice(i, i + MAX_SPANS) });
+    }
+    return ops;
+  }
+
+  /**
    * The whole state, written canonically: every placed element in order (`counter@replica`, then `<origin` on
    * the first of a run, `~` for a tombstone, then the character), the runs waiting for their origin, and the ids
    * deleted ahead of their insert. Two replicas with the same state hold the same document and will place any
