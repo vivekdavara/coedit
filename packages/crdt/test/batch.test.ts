@@ -106,6 +106,45 @@ describe('batchOps', () => {
     }
   });
 
+  test('at the exact byte boundary, with the envelope and the commas counted', () => {
+    // About 105 operations whose sizes add up to exactly `total` bytes, counting `comma` more per operation, for
+    // totals at the edges of what a batch may hold. Each batch, written with the longest sequence number, must fit.
+    // No room kept for the envelope, or no comma counted per operation, makes one of these sets a single batch one
+    // message over (review of day 3: no test pinned either).
+    const sized = (total: number, comma: number): string[] => {
+      const texts: string[] = [];
+      let bytes = 0;
+      for (let i = 0; bytes < total; i++) {
+        const counter = 1_000_000 + i * 10_000;
+        const base = utf8Length(encodeOp(ins(counter, 'x'))) - 1 + comma;
+        const length = Math.min(10_000, total - bytes - base);
+        assert.ok(length >= 1, 'the sizes chosen leave room for one more operation');
+        const text = encodeOp(ins(counter, 'x'.repeat(length)));
+        texts.push(text);
+        bytes += utf8Length(text) + comma;
+      }
+      assert.equal(bytes, total);
+      return texts;
+    };
+    const limit = MAX_MESSAGE_BYTES - 64;
+    for (const [total, comma] of [
+      [limit, 1], // exactly the limit: one batch, 18 bytes under 1 MiB
+      [MAX_MESSAGE_BYTES - 10, 1], // in one batch only if no room were kept for the envelope
+      [limit, 0], // in one batch only if the commas weren't counted
+      [MAX_MESSAGE_BYTES, 1],
+    ] as const) {
+      const batches = batchOps(sized(total, comma));
+      if (total === limit && comma === 1) assert.equal(batches.length, 1);
+      for (const batch of batches) {
+        const message = encodeServerOps(Number.MAX_SAFE_INTEGER - batch.length + 1, batch);
+        assert.ok(
+          utf8Length(message) <= MAX_MESSAGE_BYTES,
+          `${utf8Length(message)} bytes (total ${total}, comma ${comma})`,
+        );
+      }
+    }
+  });
+
   test('the largest operations each fit a message on their own', () => {
     const spans = Array.from({ length: 1_000 }, (_, i) => ({
       replica: 'r'.repeat(32),

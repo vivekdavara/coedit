@@ -351,7 +351,11 @@ describe('presence', () => {
       replica: 'x',
       cursor: { anchor: { replica: 'x', counter: 2 }, head: null },
     });
-    latest().receive({ type: 'presence', replica: 'me', cursor: null });
+    latest().receive({
+      type: 'presence',
+      replica: 'me',
+      cursor: { anchor: { replica: 'x', counter: 1 }, head: null },
+    });
     const at = (anchor: number, head: number): [string, Selection][] => [['x', { anchor, head }]];
     assert.deepEqual([...client.remoteSelections()], at(2, 0));
     client.edit(0, 0, '12');
@@ -486,6 +490,21 @@ describe('failures', () => {
     assert.equal(client.status, 'failed');
     assert.match(client.detail, /refuses log entry 2: 1@x: already known/);
     assert.deepEqual(changes, [[{ type: 'insert', index: 0, text: 'a' }]]);
+  });
+
+  test("a welcome whose log ends before what this client applied stops it (the server's bug)", () => {
+    const { client, latest } = setup();
+    client.start();
+    latest().open();
+    latest().receive(welcome(1));
+    latest().receive({ type: 'ops', from: 1, ops: [insert(1, 'x', null, 'a')] });
+    latest().drop();
+    return nextTick().then(() => {
+      latest().open();
+      latest().receive(welcome(0));
+      assert.equal(client.status, 'failed');
+      assert.match(client.detail, /log ends at 0, before the 1 entries applied here/);
+    });
   });
 
   test('ops before the welcome are refused', () => {

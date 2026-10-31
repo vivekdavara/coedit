@@ -161,7 +161,7 @@ export const MAX_MESSAGE_BYTES = 1 << 20;
 
 /**
  * Room left in a message for everything but its operations: `{"type":"ops","from":<16 digits>,"ops":[` and `]}`
- * take 48 bytes.
+ * take 47 bytes (batch.test.ts fills batches to the byte).
  */
 const OPS_ENVELOPE_BYTES = 64;
 

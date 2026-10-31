@@ -175,6 +175,31 @@ describe('the sync endpoint', () => {
     assert.ok(Date.now() - started >= 900);
   });
 
+  test('a joined connection outlives the hello timeout', async () => {
+    const doc = freshDoc();
+    const [a] = await TestClient.join(server, doc, 'a');
+    await new Promise((resolve) => setTimeout(resolve, 1_300));
+    a.send({ type: 'ops', ops: [insert(1, 'a', null, 'x')] });
+    assert.equal((await a.next()).type, 'ops');
+    a.close();
+  });
+
+  test('messages after a refused one, in the same burst, are not applied', async () => {
+    const doc = freshDoc();
+    const [a] = await TestClient.join(server, doc, 'a');
+    const [b] = await TestClient.join(server, doc, 'b');
+    // Sent back to back, so both are in the server's hands when it refuses the first.
+    a.send({ type: 'ops', ops: [insert(5, 'a', [4, 'a'], 'x')] });
+    a.send({ type: 'ops', ops: [insert(1, 'a', null, 'y')] });
+    a.send({ type: 'hello', protocol: 1, doc, replica: 'z', have: 0 });
+    await a.expectError('refused-op');
+    assert.deepEqual(await b.next(), { type: 'presence', replica: 'a', cursor: null });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(b.queued, 0);
+    assert.equal(server.inspect(doc)?.seq, 0);
+    b.close();
+  });
+
   test('a message over 1 MiB closes the connection with 1009', async () => {
     const [a] = await TestClient.join(server, freshDoc(), 'a');
     a.send(`{"type":"presence","cursor":null,"pad":"${'x'.repeat(MAX_MESSAGE_BYTES)}"}`);
