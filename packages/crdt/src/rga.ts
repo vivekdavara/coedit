@@ -109,8 +109,6 @@ interface Element {
   deletedAt: number;
   /** Placed runs whose origin it is. */
   childRuns: number;
-  /** Taken out by collect(). */
-  gone: boolean;
 }
 
 /** A stretch of the sequence: its elements in order, and how many of them are visible. */
@@ -387,7 +385,6 @@ export class Rga {
         block: null,
         deletedAt: 0,
         childRuns: 0,
-        gone: false,
       };
       run.elements.push(e);
       this.#known.set(e.id, e);
@@ -731,9 +728,9 @@ export class Rga {
    * names one). The ids are kept as collected (collectedSpans). Returns how many elements went.
    */
   collect(upTo: number): number {
+    // (One already taken isn't the last of its run any more, so it never qualifies twice.)
     const eligible = (e: Element) =>
       e.deleted &&
-      !e.gone &&
       e.deletedAt > 0 &&
       e.deletedAt <= upTo &&
       e.childRuns === 0 &&
@@ -743,11 +740,12 @@ export class Rga {
     for (const block of this.#blocks)
       for (const e of block.elements) if (eligible(e)) stack.push(e);
     const removed: Id[] = [];
+    const gone = new Set<Element>();
     const touched = new Set<Block>();
     while (stack.length > 0) {
       const e = stack.pop() as Element;
       if (!eligible(e)) continue;
-      e.gone = true;
+      gone.add(e);
       e.run.elements.pop();
       this.#known.delete(e.id);
       touched.add(e.block as Block);
@@ -767,7 +765,7 @@ export class Rga {
     if (removed.length === 0) return 0;
     for (const block of touched) {
       let kept = 0;
-      for (const e of block.elements) if (!e.gone) block.elements[kept++] = e;
+      for (const e of block.elements) if (!gone.has(e)) block.elements[kept++] = e;
       block.elements.length = kept;
     }
     this.#blocks = this.#blocks.filter((block) => block.elements.length > 0);
