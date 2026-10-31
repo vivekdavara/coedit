@@ -109,6 +109,17 @@ export interface ServerSnapshot {
   readonly last: boolean;
 }
 
+/**
+ * Ids the server has collected (day 4, DESIGN.md "Tombstones"), sent before the parts of a snapshot: elements that
+ * were deleted and are gone for good, so the snapshot doesn't hold them. The client keeps them with the snapshot's
+ * replica, and counts an outbox operation that names them as one the server has (it logged it before collecting).
+ * At most MAX_SPANS spans a message; there may be several.
+ */
+export interface ServerCollected {
+  readonly type: 'collected';
+  readonly spans: readonly Span[];
+}
+
 export interface ServerPresence {
   readonly type: 'presence';
   readonly replica: string;
@@ -124,6 +135,9 @@ export const ERROR_CODES = [
   'too-large',
   // The client's `have` is past the end of the server's log: the server lost entries the client applied.
   'ahead-of-server',
+  // An operation names an element the server has collected (day 4): the client rebuilds from a snapshot, and sends
+  // its unacknowledged edits again against it.
+  'resync',
   'server-error',
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
@@ -134,7 +148,8 @@ export interface ErrorMessage {
   readonly message: string;
 }
 
-export type ServerMessage = Welcome | ServerOps | ServerSnapshot | ServerPresence | ErrorMessage;
+export type ServerMessage =
+  Welcome | ServerOps | ServerSnapshot | ServerCollected | ServerPresence | ErrorMessage;
 
 /** A message that isn't exactly as specified. `path` names the field, e.g. `ops[2].origin.counter`. */
 export class ProtocolError extends Error {
@@ -309,7 +324,7 @@ function clientMessage(value: JsonValue): ClientMessage {
 }
 
 function serverMessage(value: JsonValue): ServerMessage {
-  const type = messageType(value, ['welcome', 'ops', 'snapshot', 'presence', 'error']);
+  const type = messageType(value, ['welcome', 'ops', 'snapshot', 'collected', 'presence', 'error']);
   switch (type) {
     case 'welcome': {
       const m = fields(value, '', ['type', 'protocol', 'doc', 'seq']);
@@ -337,6 +352,13 @@ function serverMessage(value: JsonValue): ServerMessage {
       const last = m['last'];
       if (typeof last !== 'boolean') throw new ProtocolError('last', 'must be true or false');
       return { type, seq, ops: list, last };
+    }
+    case 'collected': {
+      const m = fields(value, '', ['type', 'spans']);
+      const spans = list(m['spans'], 'spans', MAX_SPANS).map((item, i) =>
+        span(item, `spans[${i}]`),
+      );
+      return { type, spans };
     }
     case 'presence': {
       const m = fields(value, '', ['type', 'replica', 'cursor']);

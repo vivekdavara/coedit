@@ -395,6 +395,25 @@ describe('the decoder refuses', () => {
       );
     };
     const op = insertOp({});
+    refused({ type: 'collected', spans: [] }, 'spans', /must not be empty/);
+    refused(
+      { type: 'collected', spans: [{ replica: 'r', counter: 0, length: 1 }] },
+      'spans[0].counter',
+      /from 1/,
+    );
+    refused(
+      { type: 'collected', spans: [{ replica: 'r', counter: 1, length: 1 }], x: 1 },
+      'x',
+      /unknown/,
+    );
+    refused(
+      {
+        type: 'collected',
+        spans: Array.from({ length: 1001 }, () => ({ replica: 'r', counter: 1, length: 1 })),
+      },
+      'spans',
+      /more than 1000/,
+    );
     refused({ type: 'snapshot', seq: -1, ops: [], last: true }, 'seq', /from 0/);
     refused({ type: 'snapshot', seq: 1, ops: [], last: 1 }, 'last', /true or false/);
     refused({ type: 'snapshot', seq: 1, ops: [] }, 'last', /missing/);
@@ -477,5 +496,28 @@ describe('codePoints', () => {
         assert.equal(codePoints(s), Array.from(s).length);
       }),
     );
+  });
+});
+
+describe("the server's collected message", () => {
+  test('round-trips through the encoder and decoder', () => {
+    const message = {
+      type: 'collected' as const,
+      spans: [
+        { replica: 'a', counter: 1, length: 3 },
+        { replica: 'b', counter: 2 ** 53 - 10, length: 10 },
+      ],
+    };
+    const text = encodeServerMessage(message);
+    assert.equal(
+      text,
+      '{"type":"collected","spans":[{"replica":"a","counter":1,"length":3},{"replica":"b","counter":9007199254740982,"length":10}]}',
+    );
+    assert.deepEqual(decodeServerMessage(text), message);
+  });
+
+  test('the error code resync is one a server may send', () => {
+    const text = encodeServerMessage({ type: 'error', code: 'resync', message: 'x' });
+    assert.deepEqual(decodeServerMessage(text), { type: 'error', code: 'resync', message: 'x' });
   });
 });
