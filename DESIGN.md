@@ -316,6 +316,12 @@ logged and relayed. It refuses:
   a capacity on, each makes at least one element, and the server holds at most a capacity of elements: the clock
   stays below capacity squared, about 2^46, and can't run out before the document is full. A delete can't move
   anyone's clock past an id that exists, since it may only name placed elements.
+- **A delete whose spans overlap.** Applying a delete visits every id it names, and the wire format lets all 1,000
+  spans name the same 10,000 ids: one 1 MiB message of such deletes kept the server from every other client for
+  about 5 s (review of day 3). No replica writes overlapping spans (`Rga.edit`'s are disjoint), and without overlaps
+  every id named is a distinct element the server holds, so a delete's cost is bounded by the document's size.
+- **An insert under another replica's id.** A replica only makes ids under its own; a client inserting under
+  another's could take that replica's next ids, and the other's next edit would be refused as a conflict.
 - **A reused id** (`ConflictError`): the server keeps the first and refuses the second, so clients only ever see its
   choice. **A full document** (the capacity): code `too-large`. **A malformed message**: `malformed`.
 
@@ -343,8 +349,12 @@ What it logs:
   `Origin` (not a browser: the tests, a script) is let through.
 - **Dead connections.** The server pings every connection every 30 seconds and drops one that hasn't answered the
   previous ping; a laptop whose lid closed sends no close, and its cursor would otherwise stay until TCP gives up.
-- **A client that stops reading** is dropped once 16 MiB is queued for it. It reconnects and catches up from the log,
-  which is what makes dropping it safe.
+- **The catch-up is paced**: a joining client gets the log one batch at a time, each once the one before has been
+  written out to the socket; entries logged meanwhile come from the log in order, and live relays start when it
+  reaches the end. Written all at once, a long log looked like a slow reader and got a reading client dropped on
+  every attempt (review of day 3).
+- **A client that stops reading** is dropped once 16 MiB of live messages is queued for it. It reconnects and catches
+  up from the log, which is what makes dropping it safe.
 
 ## The client (day 3)
 

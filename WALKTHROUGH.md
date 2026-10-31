@@ -341,6 +341,24 @@ server failed, so the client reconnects with backoff (250 ms doubling to 10 s, w
 `welcome`). Anything else would be refused again on retry (a malformed message, an operation the server's replica
 refuses, `ahead-of-server`), so the client stops, says why, and keeps the text on screen.
 
+## The review (day 3)
+
+**What did the review find?** Three server defects, each written as a failing test first. The worst: a document with
+a long log couldn't be opened by a new tab. The server wrote the whole catch-up at once, and the rule that drops a
+client with more than 16 MiB queued counted all of it, so a client reading as fast as it could was dropped part way
+through, then again on every reconnect. Now the catch-up goes one batch at a time, each after the socket has taken
+the one before (ws's send callback), with live relays held back until the member reaches the end of the log, which
+it reads from directly, so nothing is skipped or reordered. Second: one message of deletes whose spans all named the
+same ids cost 20 million lookups, about 5 seconds of a blocked event loop; the server now refuses overlapping spans,
+which no replica writes. Third: a refused handshake (404 or 403) reset by the client at once crashed the process,
+because Node takes its socket error listener off before emitting `'upgrade'`.
+
+**Why weren't those caught by your tests?** They're about scale and hostile timing, and the tests were about
+correctness of ordinary use: no test made a log bigger than the slow-reader limit, sent overlapping spans, or reset a
+connection mid-answer. The review also ran 44 mutants of the day's code; ten survived, and six of those now have tests
+(the batch arithmetic to the byte, the hello timer, the readyState guard, two client checks), one led to a parser
+fix, and three were equivalent, two of them because a field was dead and is now gone.
+
 ## Testing sync (day 3)
 
 **How do you test sync end to end?** `sync-convergence.test.ts`: fast-check generates schedules for 2 to 4 sync
