@@ -115,6 +115,20 @@ describe('a server with a data directory', () => {
     await eventually(() => s.inspect('busy') === undefined);
   });
 
+  test('closes the store of a document loaded for a hello it refuses (no descriptor left open)', async (t) => {
+    const dataDir = tempDir(t);
+    const s = await server(t, { dataDir });
+    const { client } = await typed(s, 'warm', 'a', 'x'); // so the server's own descriptors are open already
+    const fds = fs.readdirSync('/dev/fd').length;
+    for (let i = 0; i < 5; i++) {
+      const refused = await TestClient.open(s);
+      refused.send({ type: 'hello', protocol: 1, doc: `cold-${i}`, replica: 'c', have: 3 });
+      await refused.expectError('ahead-of-server');
+    }
+    assert.equal(fs.readdirSync('/dev/fd').length, fds);
+    client.close();
+  });
+
   test('closes a document whose log write fails, and loads it from disk on the next join', async (t) => {
     const dataDir = tempDir(t);
     const s = await server(t, { dataDir });

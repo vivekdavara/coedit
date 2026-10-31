@@ -652,6 +652,25 @@ describe('a snapshot', () => {
     assert.equal(client.unacknowledged, 0);
   });
 
+  test('a delete covered by tombstone spans that only touch is acknowledged', () => {
+    const { client, latest } = setup();
+    client.start();
+    latest().open();
+    latest().take();
+    latest().receive(welcome(1));
+    latest().receive({ type: 'ops', from: 1, ops: [insert(1, 'x', null, 'abcd')] });
+    client.stop();
+    client.edit(0, 4, ''); // deletes 1..4 of x
+    client.start();
+    latest().open();
+    latest().take();
+    latest().receive(welcome(3));
+    // Two deletes by others, 1..2 and 3..4: together all of it.
+    latest().receive(snapshot(3, [insert(1, 'x', null, 'abcd'), del(1, 'x', 2), del(3, 'x', 2)]));
+    assert.equal(client.unacknowledged, 0);
+    assert.deepEqual(latest().take(), []);
+  });
+
   test("a delete the snapshot holds only part of the effect of isn't acknowledged", () => {
     const { client, latest } = setup();
     client.start();

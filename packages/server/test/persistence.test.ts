@@ -271,6 +271,7 @@ describe('a failed write', () => {
     assert.equal(b.failed?.code, 'server-error');
     assert.equal(b.messages.length, relayed, 'nothing that failed to store was relayed');
     assert.ok(h.broken);
+    assert.equal(h.members, 0, 'nobody is left joined to it');
     assert.equal(h.join(new ReplicaMember('c'), 0)?.code, 'server-error');
     assert.equal(h.submit(a, lost)?.code, 'server-error');
 
@@ -321,6 +322,26 @@ describe('a document whose files do not rebuild', () => {
       text: 'ab',
     };
     fs.writeFileSync(file, `{"seq":1,"op":${JSON.stringify(bad)}}\n`);
+    const fds = fs.readdirSync('/dev/fd').length;
     assert.throws(() => hub(root), /dependencies aren't in the document/);
+    assert.equal(fs.readdirSync('/dev/fd').length, fds, "the refused document's store is closed");
+  });
+
+  test('is refused when its snapshot leaves an operation waiting', (t) => {
+    const root = tempDir(t);
+    const dir = path.join(root, directoryName('doc'));
+    fs.mkdirSync(dir);
+    const waiting: InsertOp = {
+      type: 'insert',
+      id: { replica: 'a', counter: 2 },
+      origin: { replica: 'a', counter: 1 },
+      text: 'b',
+    };
+    fs.writeFileSync(
+      path.join(dir, 'snapshot-0000000000000001.jsonl'),
+      `{"seq":1,"ops":1}\n${JSON.stringify(waiting)}\n`,
+    );
+    fs.writeFileSync(path.join(dir, 'log-0000000000000002.jsonl'), '');
+    assert.throws(() => hub(root), /leave some waiting/);
   });
 });
