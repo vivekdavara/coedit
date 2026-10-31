@@ -11,7 +11,7 @@
  *   with it, applies what it missed (up to the `seq` in `welcome`), and only then sends its outbox, all of it, in
  *   batches: whatever was echoed by then has left the outbox, so what is resent is what the server hadn't logged
  *   when this client joined. An insert the server already had (sent just before a connection dropped) is
- *   recognized and not logged twice.
+ *   recognized and not logged twice; a delete is logged again, which changes nothing anywhere.
  * - **Errors.** A connection that closes is retried with exponential backoff and jitter. An `error` message other
  *   than `server-error` means retrying would be refused the same way, so the client stops (status `failed`).
  */
@@ -104,8 +104,6 @@ export class SyncClient {
   #seq = 0;
   /** Local operations the server hasn't echoed yet, oldest first. */
   readonly #outbox: Outgoing[] = [];
-  /** How many of the outbox's first operations went out on the current connection. */
-  #sent = 0;
   #socket: SocketLike | null = null;
   /** The log's end when the current connection joined; null until `welcome`. */
   #target: number | null = null;
@@ -169,8 +167,8 @@ export class SyncClient {
   }
 
   /**
-   * Drops the connection as a network failure would, and reconnects after the usual backoff: for tests, and for
-   * the editor's "go offline" switch.
+   * Drops the connection as a network failure would, and reconnects after the usual backoff (for tests; the
+   * editor's "Go offline" switch uses stop() and start()).
    */
   disconnect(): void {
     const socket = this.#socket;
@@ -323,7 +321,6 @@ export class SyncClient {
           if (head !== undefined && head.text === encodeOp(op)) {
             // Its echo: applied here already.
             this.#outbox.shift();
-            this.#sent = Math.max(0, this.#sent - 1);
           } else {
             try {
               for (const change of this.rga.apply(op)) changes.push(change);
@@ -361,11 +358,14 @@ export class SyncClient {
     }
   }
 
-  /** Caught up: sends everything in the outbox, then this client's cursor. */
+  /**
+   * Caught up: sends everything in the outbox, then this client's cursor. Nothing of the outbox has gone out on this
+   * connection yet (edits made before this wait, and a drop forgets the connection), so it all goes.
+   */
   #goLive(): void {
     this.#live = true;
     this.#setStatus('online', '');
-    this.#flush(this.#sent);
+    this.#flush(0);
     if (this.#cursor !== null) {
       this.#send(encodeClientMessage({ type: 'presence', cursor: this.#cursor }));
     }
@@ -375,7 +375,6 @@ export class SyncClient {
   #flush(from: number): void {
     const texts = this.#outbox.slice(from).map((o) => o.text);
     for (const batch of batchOps(texts)) this.#send(encodeClientOps(batch));
-    this.#sent = this.#outbox.length;
   }
 
   #send(text: string): void {
@@ -394,7 +393,6 @@ export class SyncClient {
     this.#socket = null;
     this.#target = null;
     this.#live = false;
-    this.#sent = 0;
     // Entries held from this connection come again on the next (its hello asks from the last one applied).
     if (this.#held !== null) this.#held = [];
     if (this.#remote.size > 0) {
