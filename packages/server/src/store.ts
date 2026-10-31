@@ -118,6 +118,8 @@ export class DocumentStore {
     const segments: { first: number; last: number }[] = [];
     const entries: string[] = [];
     let torn = 0;
+    // The torn tail to cut off, once everything else has been checked: a document that's refused is left as it was.
+    let tear: { file: string; at: number } | null = null;
     let first = 0;
     let next = 0;
     for (let s = 0; s < segmentNames.length; s++) {
@@ -135,6 +137,7 @@ export class DocumentStore {
       }
       const read = readSegment(file, start, s === segmentNames.length - 1);
       for (const entry of read.entries) entries.push(entry);
+      if (read.torn > 0) tear = { file, at: read.bytes };
       torn += read.torn;
       segments.push({ first: start, last: start + read.entries.length - 1 });
       next = start + read.entries.length;
@@ -152,6 +155,10 @@ export class DocumentStore {
     }
     if (snapshot === null && first !== 1) {
       throw new StoreError(dir, `no snapshot, and the log starts at entry ${first}, not 1`);
+    }
+    if (tear !== null) {
+      // An append the process didn't finish. Nothing in it was relayed (the hub relays only after the append).
+      fs.truncateSync(tear.file, tear.at);
     }
     if (segments.length === 0) {
       fs.writeFileSync(path.join(dir, `log-${pad(first)}.jsonl`), '', { flag: 'wx' });
@@ -188,9 +195,9 @@ export class DocumentStore {
 
   /**
    * Writes a snapshot after the last entry (`ops`: Rga.snapshot's operations as encodeOp writes them), starts a new
-   * segment, and deletes the older snapshots and every segment holding only entries before `keepFrom`. Throws if the
-   * snapshot couldn't be written (its temporary file removed) or the new segment couldn't be started (the snapshot is
-   * in place, and appends go on in the segment they were in); a deletion that fails is only logged (#prune).
+   * segment, and deletes the older snapshots and every segment holding only entries before `keepFrom`. Throws only if
+   * the snapshot couldn't be written (its temporary file is removed); a new segment that can't be started or a
+   * deletion that fails is logged, and tried again at the next snapshot.
    */
   snapshot(ops: readonly string[], keepFrom: number): void {
     this.#open();
@@ -218,14 +225,28 @@ export class DocumentStore {
       }
       throw error;
     }
-    // A new segment for the entries after it, unless the last one is still empty.
+    // A new segment for the entries after it, unless the last one is still empty. The snapshot is in place either
+    // way, so failing to start one is only logged: appends go on in the segment they were in, and the next snapshot
+    // tries again. (Thrown, it made the hub count the snapshot as failed and keep every older one: one more full
+    // snapshot on disk an interval, review of day 4.)
     const tail = this.#segments.at(-1) as { first: number; last: number };
     if (tail.last >= tail.first) {
-      const file = path.join(this.dir, `log-${pad(seq + 1)}.jsonl`);
-      const next = fs.openSync(file, 'wx');
-      fs.closeSync(this.#fd);
-      this.#fd = next;
-      this.#segments.push({ first: seq + 1, last: seq });
+      try {
+        const next = fs.openSync(path.join(this.dir, `log-${pad(seq + 1)}.jsonl`), 'wx');
+        const old = this.#fd;
+        this.#fd = next;
+        this.#segments.push({ first: seq + 1, last: seq });
+        try {
+          fs.closeSync(old);
+        } catch {
+          // Its entries are written (and synced, with fsync on); a descriptor that won't close is only lost.
+        }
+      } catch (error) {
+        console.error(
+          `coedit: starting a new segment in ${this.dir} failed; appending to the last one`,
+          error,
+        );
+      }
     }
     if (this.#fsync) syncDirectory(this.dir);
     this.#prune(name, keepFrom);
@@ -319,7 +340,7 @@ function readSegment(
   file: string,
   first: number,
   isLast: boolean,
-): { entries: string[]; torn: number } {
+): { entries: string[]; torn: number; bytes: number } {
   const read = lines(file);
   if (read.rest > 0 && !isLast) {
     throw new StoreError(
@@ -344,11 +365,7 @@ function readSegment(
     }
     entries.push(checkedOp(file, i + 1, op));
   }
-  if (read.rest > 0) {
-    // An append the process didn't finish. Nothing in it was relayed (the hub relays only after the append).
-    fs.truncateSync(file, read.bytes);
-  }
-  return { entries, torn: read.rest };
+  return { entries, torn: read.rest, bytes: read.bytes };
 }
 
 function readSnapshot(file: string): { seq: number; ops: string[] } {

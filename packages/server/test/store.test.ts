@@ -114,6 +114,23 @@ describe('what a crash leaves', () => {
     });
   }
 
+  test('leaves a document it refuses as it was, torn tail included (review of day 4)', (t) => {
+    const root = tempDir(t);
+    const first = open(root);
+    first.store.append(1, entries(1, 2));
+    first.store.close();
+    const dir = path.join(root, 'doc');
+    // Moved so the log no longer starts at 1, with half a line at its end.
+    fs.renameSync(path.join(dir, segment(1)), path.join(dir, segment(3)));
+    fs.writeFileSync(
+      path.join(dir, segment(3)),
+      `{"seq":3,"op":${entries(3, 1)[0] as string}}\n{"seq":4,"op":{"ty`,
+    );
+    const size = fs.statSync(path.join(dir, segment(3))).size;
+    assert.throws(() => open(root), /starts at entry 3, not 1/);
+    assert.equal(fs.statSync(path.join(dir, segment(3))).size, size);
+  });
+
   test('removes a snapshot that was being written', (t) => {
     const root = tempDir(t);
     open(root).store.close();

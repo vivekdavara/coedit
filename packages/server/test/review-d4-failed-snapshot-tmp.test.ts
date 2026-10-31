@@ -44,3 +44,29 @@ test('a snapshot whose rename keeps failing does not leave a temporary file per 
   assert.equal(tmp.length, 0, found);
   assert.equal(renames.mock.callCount(), 3, found);
 });
+
+test('a snapshot whose new segment cannot be opened does not leave a snapshot file per operation', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'coedit-review-d4-'));
+  t.after(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const hub = new DocumentHub('doc', { store: { root, fsync: false }, snapshotEvery: 10 });
+  const member: Member = { replica: 'a', send() {}, replace() {}, fail() {} };
+  assert.equal(hub.join(member, 0), null);
+  const rga = new Rga('a');
+  t.mock.method(console, 'error', () => {});
+  const openSync = fs.openSync;
+  t.mock.method(fs, 'openSync', (file: fs.PathLike, flags: fs.OpenMode, ...rest: unknown[]) => {
+    if (flags === 'wx' && /log-\d{16}\.jsonl$/.test(String(file))) {
+      throw Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' });
+    }
+    return (openSync as (...a: unknown[]) => number)(file, flags, ...rest);
+  });
+  for (let i = 0; i < 30; i++) assert.equal(hub.submit(member, rga.edit(rga.length, 0, 'x')), null);
+  hub.close();
+  t.mock.restoreAll();
+  const dir = path.join(root, directoryName('doc'));
+  const snapshots = fs.readdirSync(dir).filter((n) => n.startsWith('snapshot-'));
+  // Fixed: the snapshot is in place, so a segment that can't be started is only logged, and the older snapshots go.
+  assert.equal(snapshots.length, 1, `${snapshots.length} snapshot files: ${snapshots.join(' ')}`);
+});
