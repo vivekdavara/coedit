@@ -415,8 +415,13 @@ export class DocumentHub {
     try {
       // Tombstones whose last delete is in an entry this snapshot lets go of: every client that will catch up from
       // the log has applied it, and one further behind gets a snapshot (DESIGN.md "Tombstones").
-      if (this.#collect) this.#rga.collect(keepFrom - 1);
-      store.snapshot(this.#rga.snapshot().map(encodeOp), keepFrom, this.#rga.collectedSpans());
+      // The replica changes only once the snapshot of it after the collection is on disk: a write that fails leaves it
+      // as a reload would rebuild it (review of the collection).
+      const write = (after: { readonly ops: Op[]; readonly collected: Span[] }) => {
+        store.snapshot(after.ops.map(encodeOp), keepFrom, after.collected);
+      };
+      if (this.#collect) this.#rga.collect(keepFrom - 1, write);
+      else write({ ops: this.#rga.snapshot(), collected: this.#rga.collectedSpans() });
     } catch (error) {
       console.error(`coedit: writing a snapshot of ${this.doc} failed`, error);
       return;

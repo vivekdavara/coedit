@@ -122,6 +122,12 @@ describe('Rga.collect', () => {
     fc.assert(
       fc.property(sessions, (steps) => {
         const { server } = run(steps);
+        // A last collection through write: what it's given is what the replica then holds.
+        let written: { ops: Op[]; collected: unknown[] } | null = null;
+        server.collect(Number.MAX_SAFE_INTEGER, (after) => {
+          written = after;
+        });
+        assert.deepEqual(written, { ops: server.snapshot(), collected: server.collectedSpans() });
         const rebuilt = new Rga('server');
         rebuilt.markCollected(server.collectedSpans());
         for (const op of server.snapshot()) rebuilt.apply(op);
@@ -129,6 +135,29 @@ describe('Rga.collect', () => {
       }),
       { numRuns: 300 },
     );
+  });
+
+  test('with write: given the snapshot of the state after, and a write that throws changes nothing', () => {
+    const rga = new Rga('s');
+    rga.edit(0, 0, 'abc');
+    rga.apply({ type: 'delete', spans: [{ replica: 's', counter: 2, length: 2 }] }, 4);
+    const state = rga.state();
+    assert.throws(
+      () =>
+        rga.collect(4, () => {
+          throw new Error('the disk is full');
+        }),
+      /the disk is full/,
+    );
+    assert.equal(rga.state(), state, 'nothing changed');
+    let written: { ops: Op[]; collected: unknown[] } | null = null;
+    assert.equal(
+      rga.collect(4, (after) => {
+        written = after;
+      }),
+      2,
+    );
+    assert.deepEqual(written, { ops: rga.snapshot(), collected: rga.collectedSpans() });
   });
 
   test('takes a run from its end, then its origin once no run names it', () => {

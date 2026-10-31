@@ -692,11 +692,17 @@ export class Rga {
    * holding waiting operations, which have no place to be written at (the server never holds any).
    */
   snapshot(): Op[] {
+    return this.#snapshot(new Set());
+  }
+
+  /** snapshot(), as it will be once the elements in `without` (each the end of what's left of its run) are gone. */
+  #snapshot(without: ReadonlySet<Element>): Op[] {
     if (this.pending > 0) throw new Error(`${this.pending} operations are waiting: no snapshot`);
     const runs = new Set<Run>();
     const tombstones: Element[] = [];
     for (const block of this.#blocks) {
       for (const e of block.elements) {
+        if (without.has(e)) continue;
         runs.add(e.run);
         if (e.deleted) tombstones.push(e);
       }
@@ -704,13 +710,14 @@ export class Rga {
     // A run whose end was collected is written as what's left of it.
     const ops: Op[] = [...runs]
       .sort((a, b) => compareIds(a.op.id, b.op.id))
-      .map((run) =>
-        validateOp(
-          run.elements.length === Array.from(run.op.text).length
+      .map((run) => {
+        const kept = run.elements.filter((e) => !without.has(e));
+        return validateOp(
+          kept.length === Array.from(run.op.text).length
             ? run.op
-            : { ...run.op, text: run.elements.map((e) => e.char).join('') },
-        ),
-      );
+            : { ...run.op, text: kept.map((e) => e.char).join('') },
+        );
+      });
     const spans = spansOf(tombstones);
     for (let i = 0; i < spans.length; i += MAX_SPANS) {
       ops.push({ type: 'delete', spans: spans.slice(i, i + MAX_SPANS) });
@@ -725,53 +732,90 @@ export class Rga {
    * origin, past every larger id; where a leaf tombstone was the first smaller id, the element after it is smaller
    * still, so removing it changes where nothing goes, as long as no operation still to arrive names it: that is the
    * caller's to know (the server collects only tombstones deleted before the log it keeps, and resyncs a client that
-   * names one). The ids are kept as collected (collectedSpans). Returns how many elements went.
+   * names one). The ids are kept as collected (collectedSpans). With `write`, it is first given the snapshot of the
+   * state after the collection (snapshot() and collectedSpans() as they will be), and if it throws nothing changes.
+   * Returns how many elements went.
    */
-  collect(upTo: number): number {
-    // (One already taken isn't the last of its run any more, so it never qualifies twice.)
-    const eligible = (e: Element) =>
-      e.deleted &&
-      e.deletedAt > 0 &&
-      e.deletedAt <= upTo &&
-      e.childRuns === 0 &&
-      e.run.elements.at(-1) === e &&
-      !this.#waiting.has(e.id);
-    const stack: Element[] = [];
-    for (const block of this.#blocks)
-      for (const e of block.elements) if (eligible(e)) stack.push(e);
-    const removed: Id[] = [];
-    const gone = new Set<Element>();
+  collect(
+    upTo: number,
+    write?: (after: { readonly ops: Op[]; readonly collected: Span[] }) => void,
+  ): number {
+    const taken = this.#collectable(upTo);
+    if (write !== undefined) {
+      // The snapshot of the state after it, written before anything changes: if writing throws, nothing has (the
+      // review of the collection found a failed snapshot write leaving the replica collected and the disk not).
+      const without = new Set(taken);
+      const collected = new IdRanges();
+      for (const span of this.#collected.spans(MAX_SPAN_LENGTH)) {
+        collected.addSpan(span.replica, span.counter, span.length);
+      }
+      collected.addAll(taken.map((e) => e.id));
+      write({ ops: this.#snapshot(without), collected: collected.spans(MAX_SPAN_LENGTH) });
+    }
+    if (taken.length === 0) return 0;
     const touched = new Set<Block>();
-    while (stack.length > 0) {
-      const e = stack.pop() as Element;
-      if (!eligible(e)) continue;
-      gone.add(e);
+    for (const e of taken) {
+      // In the order found: each the last element left in its run.
       e.run.elements.pop();
       this.#known.delete(e.id);
       touched.add(e.block as Block);
-      removed.push(e.id);
-      const before = e.run.elements.at(-1);
-      if (before !== undefined) {
-        if (eligible(before)) stack.push(before);
-      } else if (e.run.op.origin !== null) {
-        // The whole run is gone: its origin has one child run fewer.
+      if (e.run.elements.length === 0 && e.run.op.origin !== null) {
         const origin = this.#known.get(e.run.op.origin);
-        if (origin !== undefined) {
-          origin.childRuns--;
-          if (eligible(origin)) stack.push(origin);
-        }
+        if (origin !== undefined) origin.childRuns--;
       }
     }
-    if (removed.length === 0) return 0;
+    const gone = new Set(taken);
     for (const block of touched) {
       let kept = 0;
       for (const e of block.elements) if (!gone.has(e)) block.elements[kept++] = e;
       block.elements.length = kept;
     }
     this.#blocks = this.#blocks.filter((block) => block.elements.length > 0);
-    this.#placed -= removed.length;
-    this.#collected.addAll(removed);
-    return removed.length;
+    this.#placed -= taken.length;
+    this.#collected.addAll(taken.map((e) => e.id));
+    return taken.length;
+  }
+
+  /**
+   * The elements collect(upTo) takes, in an order it can take them in (each the last element left in its run when its
+   * turn comes), found without changing anything: what's left of each run, and each origin's child runs, are counted
+   * aside.
+   */
+  #collectable(upTo: number): Element[] {
+    const left = new Map<Run, number>();
+    const childRuns = new Map<Element, number>();
+    const remaining = (run: Run) => left.get(run) ?? run.elements.length;
+    const eligible = (e: Element) =>
+      e.deleted &&
+      e.deletedAt > 0 &&
+      e.deletedAt <= upTo &&
+      (childRuns.get(e) ?? e.childRuns) === 0 &&
+      e.run.elements[remaining(e.run) - 1] === e &&
+      !this.#waiting.has(e.id);
+    const stack: Element[] = [];
+    for (const block of this.#blocks)
+      for (const e of block.elements) if (eligible(e)) stack.push(e);
+    const taken: Element[] = [];
+    while (stack.length > 0) {
+      const e = stack.pop() as Element;
+      // (One already taken isn't the last left of its run any more, so it never qualifies twice.)
+      if (!eligible(e)) continue;
+      taken.push(e);
+      const n = remaining(e.run) - 1;
+      left.set(e.run, n);
+      if (n > 0) {
+        const before = e.run.elements[n - 1] as Element;
+        if (eligible(before)) stack.push(before);
+      } else if (e.run.op.origin !== null) {
+        // The whole run is gone: its origin has one child run fewer.
+        const origin = this.#known.get(e.run.op.origin);
+        if (origin !== undefined) {
+          childRuns.set(origin, (childRuns.get(origin) ?? origin.childRuns) - 1);
+          if (eligible(origin)) stack.push(origin);
+        }
+      }
+    }
+    return taken;
   }
 
   /** The ids collected, as spans (each at most MAX_SPAN_LENGTH), by replica then counter: for snapshots. */
