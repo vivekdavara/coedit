@@ -389,3 +389,90 @@ close, so a client started before the server waited forever. The server's comman
 installed its signal handlers, and under the suite's new load the SIGTERM test hit that window once (the default
 action killed the process); `signal-order.test.ts` checks the order from inside the child, without timing. And the
 editor kept showing "1 edit not yet acknowledged" because an echo changes no text, so nothing re-rendered.
+
+## Persistence (day 4)
+
+**What's on disk, and when is it written?** One directory per document (`packages/server/src/store.ts`): the log in
+segments, one JSON line per entry (`{"seq":n,"op":...}`), and the newest snapshot. `submit` applies a message's
+operations to the server's replica, appends the new entries in one write, fsyncs, and only then relays them. So
+anything a client has seen, the disk has: a restart can't leave a client ahead of the server, which before day 4 was
+exactly what a restart did. `persistence.test.ts` checks the order directly: the relay's fake member reads the log
+file while it's being sent the message, and the entry is already there.
+
+**What if the process dies in the middle of a write?** The last line of the last segment may be cut off. Opening
+drops a final piece with no newline and truncates the file there; that piece was never relayed (the relay comes after
+the write) and its sender still has it in its outbox, so it comes again on reconnect. Anything else that doesn't read
+back exactly (a bad line in the middle, a gap in the numbers, a snapshot short of its count) refuses the document
+with `server-error` rather than serve it with something missing. `crash.test.ts` kills the server with SIGKILL while
+a client types, three rounds, and checks the restarted log holds every entry the client saw echoed.
+
+**What is a snapshot?** A list of ordinary operations that rebuilds the document: every run's original insert, in the
+order its first element appears in the sequence, then deletes of the tombstones (`Rga.snapshot`). An element always
+comes after its origin, so each insert's origin is placed by an earlier one, and any order with origins first builds
+the same sequence. Because they're just operations, a client that already has part of the document applies a
+snapshot like anything else: what it has is a duplicate, the rest merges. Runs go whole, not as the stretches the
+sequence shows now, because a run's middle sent as a run of its own would conflict with a replica holding the run.
+
+**Who gets one?** A client whose `have` is older than the oldest entry the server keeps. The server keeps the newest
+snapshot and the entries since the one before it, so a client that missed less than one interval (10,000 entries)
+catches up from the log as before. The snapshot comes in parts (1,000 operations, 1 MiB each), and the client moves
+its sequence number only at the last, so a drop part way just asks again.
+
+**What happens to the client's outbox when it gets a snapshot?** That's the subtle part. Operations of its own that
+the server logged before the snapshot will never be echoed to it (their echoes were in the entries the snapshot
+replaces), so the client would wait for them forever. The snapshot holds exactly what the server had logged by then,
+so the client drops every insert whose run is in it and every delete all of whose ids are tombstones in it, and sends
+the rest. A delete whose effect is there may not have been logged (someone else deleted the same text), but it needs
+no echo: it changes nothing anywhere. `sync-unit.test.ts` has the cases, including a delete only partly covered,
+which stays.
+
+**What does a full disk do?** The append throws. The replica already has the message's operations and the disk may
+not, so the hub can't go on: it sends `server-error` to every member (clients retry that), refuses everything, and the
+server drops it. The next join loads the document from what reached the disk; the sender resends from its outbox.
+Tested with `fs.writeSync` mocked to throw, all at once and after writing half.
+
+**Why fsync every message, when it caps the server at about 340 messages a second?** Because an echo is a promise:
+the client drops the operation from its outbox. Without fsync, a power loss after the echo loses an operation nobody
+has any more. With it, on this Mac each fsync is `F_FULLFSYNC`, about 3 ms. Group commit (one fsync for every message
+that arrived during the previous one) would keep the promise at a much higher rate; it isn't built, and the number is
+in the README.
+
+**Why escape capital letters in directory names?** Document names are case-sensitive (`Notes` and `notes` are two
+documents) and macOS's file systems by default aren't, so both would share one directory. A capital is written as `^`
+and the lower-case letter, which no document name contains.
+
+## Measurements (day 4)
+
+**How fast is the CRDT?** `npm run editing -w @coedit/crdt` runs a seeded synthetic session of 100,000 edits (typing,
+backspaces, jumps, selections, pastes). Local edits run at about 21,000 a second in the first tenth and fall to about
+1,460 by 369,000 elements, because every operation scans one array from the start (O(n)). A second replica applying
+all 95,043 operations manages about 3,300 a second, the same from JSON through the strict decoder, so the decoder
+isn't the cost; placement is.
+
+**Is that a problem?** Not for typing: a person makes a few edits a second. It is for big documents: loading a
+document of 100,000 one-character entries takes 6 to 7 s, from the log or from a snapshot alike (each run is placed by
+the same scan), and the server's event loop is blocked for all of it. The fix is a tree, or blocks of elements with
+visible counts, behind the same interface; not built yet.
+
+**How big do documents get?** In that session 45% of the elements are tombstones at the end; each element is about
+186 bytes of heap; a snapshot is about 40 bytes per visible character and the log about 50 (JSON around a few
+characters per run).
+
+## Tombstones (day 4)
+
+**Why aren't tombstones collected?** Because knowing when one is safe to remove is the hard part, and day 4 built
+persistence instead. Removing a tombstone changes nothing if no element has it as its origin and no operation still
+to arrive names it: RGA places an insert just after its origin, past every larger id, so where a childless tombstone
+was the first smaller id, the element after it is smaller still, and the insert stops at the same place. But only the
+server's view of every client that may still send can say "nothing will name it", and an offline client can return
+any time with operations made before it saw the delete. That needs a client message ("I have applied up to n", after
+its outbox), a retention window, and a resync for a client returning past it that re-anchors its offline inserts.
+DESIGN.md "Tombstones" has it; it's the main thing left in the CRDT.
+
+## Testing end to end (day 4)
+
+**How do you test two people at once?** Playwright (`packages/client/e2e/two-browsers.spec.ts`), two browser contexts
+on the real dev server and sync server: typing seen both ways with the other's caret, both typing at one spot at once
+(the result is one run then the other, as RGA promises), one offline while both edit and then back (both end with
+everything, nothing unacknowledged), and a document opened after everyone left. It uses the installed Chrome, so CI
+runs it too without downloading a browser.
