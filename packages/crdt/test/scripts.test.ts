@@ -86,3 +86,47 @@ test('worst-delete reports a first delete refused for the capacity', async () =>
     /^refused \(RangeError\): 0 ids deleted ahead from a \d+-byte message: \d+\.\d ms, heap \+\d+ MiB, pending 0$/m,
   );
 });
+
+test('editing measures a session it actually ran: every tenth, both readers converged, growth and heap', async () => {
+  const out = await run('../scripts/editing.ts', ['500', '7'], ['--expose-gc']);
+  const session = /synthetic session: 500 edits \(seed 7\), ([\d,]+) operations/.exec(out);
+  assert.ok(session !== null, out);
+  const kinds =
+    /kinds: type ([\d,]+), backspace ([\d,]+), move ([\d,]+), selection ([\d,]+), paste ([\d,]+), word ([\d,]+)/.exec(
+      out,
+    );
+  assert.ok(kinds !== null, out);
+  const counts = kinds.slice(1).map((n) => Number(n.replaceAll(',', '')));
+  assert.equal(
+    counts.reduce((a, b) => a + b, 0),
+    500,
+    'every edit is one of the kinds',
+  );
+  assert.ok(
+    counts.every((n) => n > 0),
+    out,
+  );
+  const windows = [
+    ...out.matchAll(
+      /^ +\d+: ([\d,]+) edits\/s, ending at ([\d,]+) visible \/ ([\d,]+) elements$/gm,
+    ),
+  ];
+  assert.equal(windows.length, 10, out);
+  for (const [, rate, visible, elements] of windows) {
+    assert.ok(Number(rate?.replaceAll(',', '')) > 0, out);
+    assert.ok(Number(visible?.replaceAll(',', '')) <= Number(elements?.replaceAll(',', '')), out);
+  }
+  assert.match(out, /remote integration: [\d,]+ operations\/s applied .* [\d,]+\/s from JSON text/);
+  assert.match(out, /large paste: 100,000 characters \(10 operations\)/);
+  const growth = /([\d,]+) visible characters, ([\d,]+) elements, ([\d.]+)% tombstones/.exec(out);
+  assert.ok(growth !== null, out);
+  // The paste's 100,000 characters were deleted again: they are tombstones now.
+  assert.ok(Number(growth[2]?.replaceAll(',', '')) >= 100_000, out);
+  assert.ok(Number(growth[3]) > 50 && Number(growth[3]) < 100, out);
+  assert.match(out, /snapshot [\d,]+ bytes \([\d.]+ per visible character, \d+ operations\)/);
+  const heap =
+    /heap: a replica rebuilt from the snapshot takes [\d,-]+ bytes, (-?\d+) per element \(same text\)/.exec(
+      out,
+    );
+  assert.ok(heap !== null && Number(heap[1]) > 0, out);
+});
