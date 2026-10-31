@@ -73,3 +73,96 @@ export class IdMap<V> {
     return ids.sort(compareIds);
   }
 }
+
+/**
+ * Sets of ids as ranges of consecutive counters, per replica, sorted and merged: the ids a replica has collected (day
+ * 4), which can be many but come mostly in long runs. Lookups are a binary search.
+ */
+export class IdRanges {
+  /** Per replica: disjoint, non-adjacent [first, last] ranges in counter order. */
+  readonly #ranges = new Map<string, [number, number][]>();
+  #count = 0;
+
+  /** Ids held. */
+  get size(): number {
+    return this.#count;
+  }
+
+  has(id: Id): boolean {
+    return this.overlaps(id.replica, id.counter, id.counter);
+  }
+
+  /** Whether any of `replica`'s counters from `first` to `last` is held. */
+  overlaps(replica: string, first: number, last: number): boolean {
+    const list = this.#ranges.get(replica);
+    if (list === undefined) return false;
+    // The last range starting at or before `last`.
+    let lo = 0;
+    let hi = list.length - 1;
+    let found = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if ((list[mid] as [number, number])[0] <= last) {
+        found = mid;
+        lo = mid + 1;
+      } else hi = mid - 1;
+    }
+    return found >= 0 && (list[found] as [number, number])[1] >= first;
+  }
+
+  /** Adds ids (any order, duplicates of held ones allowed). */
+  addAll(ids: readonly Id[]): void {
+    const byReplica = new Map<string, number[]>();
+    for (const { replica, counter } of ids) {
+      const counters = byReplica.get(replica);
+      if (counters === undefined) byReplica.set(replica, [counter]);
+      else counters.push(counter);
+    }
+    for (const [replica, counters] of byReplica) {
+      counters.sort((a, b) => a - b);
+      const added: [number, number][] = [];
+      for (const c of counters) {
+        const last = added.at(-1);
+        if (last !== undefined && c <= last[1] + 1) last[1] = Math.max(last[1], c);
+        else added.push([c, c]);
+      }
+      this.#merge(replica, added);
+    }
+  }
+
+  /** Adds `length` ids of `replica` from `counter`. */
+  addSpan(replica: string, counter: number, length: number): void {
+    this.#merge(replica, [[counter, counter + length - 1]]);
+  }
+
+  /** Every range, by replica in code-unit order then counter, each as a span of at most `maxLength` ids. */
+  spans(maxLength: number): { replica: string; counter: number; length: number }[] {
+    const spans: { replica: string; counter: number; length: number }[] = [];
+    for (const replica of [...this.#ranges.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
+      for (const [first, last] of this.#ranges.get(replica) as [number, number][]) {
+        for (let c = first; c <= last; c += maxLength) {
+          spans.push({ replica, counter: c, length: Math.min(maxLength, last - c + 1) });
+        }
+      }
+    }
+    return spans;
+  }
+
+  /** Merges sorted, merged `added` into `replica`'s ranges. */
+  #merge(replica: string, added: readonly [number, number][]): void {
+    const old = this.#ranges.get(replica) ?? [];
+    const all = [...old, ...added].sort((a, b) => a[0] - b[0]);
+    const merged: [number, number][] = [];
+    let count = 0;
+    for (const [first, last] of all) {
+      const prev = merged.at(-1);
+      if (prev !== undefined && first <= prev[1] + 1) prev[1] = Math.max(prev[1], last);
+      else merged.push([first, last]);
+    }
+    for (const [first, last] of merged) count += last - first + 1;
+    let before = 0;
+    for (const [first, last] of old) before += last - first + 1;
+    this.#ranges.set(replica, merged);
+    this.#count += count - before;
+  }
+}

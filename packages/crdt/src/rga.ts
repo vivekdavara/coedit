@@ -11,7 +11,7 @@
  * skips whole blocks: about n / B + B steps for B elements a block, not n. Day 4 measured the single array this
  * replaced at 1,462 local edits a second at 369,000 elements (README "Results (day 4)").
  */
-import { IdMap, compareIds, formatId, sameId } from './ids.ts';
+import { IdMap, IdRanges, compareIds, formatId, sameId } from './ids.ts';
 import {
   MAX_INSERT_LENGTH,
   MAX_SPAN_LENGTH,
@@ -75,10 +75,23 @@ export class ConflictError extends Error {
   }
 }
 
+/**
+ * An operation naming an element this replica has collected (Rga.collect): an insert whose ids or origin are among
+ * them. Collected elements were deleted, and only a replica that hadn't seen the delete can still name them; the
+ * server answers such an operation by resyncing its sender (DESIGN.md "Tombstones"). Nothing changes.
+ */
+export class CollectedError extends Error {
+  constructor(problem: string) {
+    super(problem);
+    this.name = 'CollectedError';
+  }
+}
+
 /** One insert operation's elements, placed together. */
 interface Run {
   /** The operation, as checked and copied by validateOp: nothing outside holds it. */
   readonly op: InsertOp;
+  /** Its elements in order; collection takes them from the end. */
   readonly elements: Element[];
   /** In the sequence; false while it waits for its origin. */
   placed: boolean;
@@ -92,6 +105,12 @@ interface Element {
   deleted: boolean;
   /** The block holding it; null while it waits for its origin. */
   block: Block | null;
+  /** The largest stamp of the deletes naming it (apply's `stamp`; 0: none given). Collection goes by it. */
+  deletedAt: number;
+  /** Placed runs whose origin it is. */
+  childRuns: number;
+  /** Taken out by collect(). */
+  gone: boolean;
 }
 
 /** A stretch of the sequence: its elements in order, and how many of them are visible. */
@@ -127,6 +146,8 @@ export class Rga {
   /** Visible elements. */
   #length = 0;
   readonly #capacity: number;
+  /** Ids collected (Rga.collect): deleted elements taken out for good. */
+  readonly #collected = new IdRanges();
 
   constructor(replica: string, options: RgaOptions = {}) {
     if (!isReplicaName(replica)) {
@@ -276,14 +297,17 @@ export class Rga {
    * Applies an operation from anyone, this replica's own echoes included. Returns the visible changes in order:
    * none for a duplicate or an operation still waiting; when an operation completes the dependencies of waiting
    * ones, theirs too. Throws ProtocolError for an operation that isn't valid, ConflictError for one that reuses a
-   * known id with other content, and RangeError for one that would pass the capacity; it changes nothing then.
+   * known id with other content, CollectedError for an insert naming a collected element, and RangeError for one
+   * that would pass the capacity; it changes nothing then. `stamp` (the server passes the log entry's sequence
+   * number) is recorded on every element a delete names, for collect(); ids a delete names that were collected are
+   * deleted already, and skipped.
    */
-  apply(op: Op): Change[] {
-    return this.#apply(validateOp(op));
+  apply(op: Op, stamp = 0): Change[] {
+    return this.#apply(validateOp(op), stamp);
   }
 
-  #apply(op: Op): Change[] {
-    return op.type === 'insert' ? this.#insert(op) : this.#delete(op);
+  #apply(op: Op, stamp = 0): Change[] {
+    return op.type === 'insert' ? this.#insert(op) : this.#delete(op, stamp);
   }
 
   /** Whether this replica holds the element `id`, placed or waiting for its origin. */
@@ -320,6 +344,14 @@ export class Rga {
 
   #insert(op: InsertOp): Change[] {
     const chars = Array.from(op.text);
+    if (this.#collected.overlaps(op.id.replica, op.id.counter, op.id.counter + chars.length - 1)) {
+      throw new CollectedError(`${formatId(op.id)}: names ids this replica has collected`);
+    }
+    if (op.origin !== null && this.#collected.has(op.origin)) {
+      throw new CollectedError(
+        `${formatId(op.id)}: its origin ${formatId(op.origin)} was collected`,
+      );
+    }
     // A run is created whole by one replica, which never reuses a counter, so a run that arrives again is known
     // whole, as the same run: the same first id, origin and text. Anything else that touches a known id is a
     // conflict, so whether two inserts conflict doesn't depend on which arrives first. Waiting runs count: their
@@ -351,6 +383,9 @@ export class Rga {
         run,
         deleted: false,
         block: null,
+        deletedAt: 0,
+        childRuns: 0,
+        gone: false,
       };
       run.elements.push(e);
       this.#known.set(e.id, e);
@@ -427,6 +462,7 @@ export class Rga {
     block.elements.splice(i, 0, ...run.elements);
     run.placed = true;
     this.#placed += run.elements.length;
+    if (origin !== null) origin.childRuns++;
     // Elements deleted ahead of their insert are placed as tombstones, so only the rest show.
     let text = '';
     let shown = 0;
@@ -479,7 +515,7 @@ export class Rga {
     return { b, before };
   }
 
-  #delete(op: DeleteOp): Change[] {
+  #delete(op: DeleteOp, stamp: number): Change[] {
     // The same delete still waiting has nothing more to do: whatever it names that has arrived since was deleted
     // on arrival. Without this check a resend (a client resends its outbox on every reconnect) would add a second
     // wait for the same ids, which would end with the first; nothing visible would change, except that at the
@@ -501,6 +537,7 @@ export class Rga {
       for (let i = 0; i < span.length; i++) {
         const id = { replica: span.replica, counter: span.counter + i };
         const e = this.#known.get(id);
+        if (e === undefined && this.#collected.has(id)) continue; // deleted, and collected since
         if (e === undefined) {
           // Every delete naming a missing id waits for it, not only the first: otherwise which of two deletes
           // waits would depend on which arrived first.
@@ -509,10 +546,14 @@ export class Rga {
           if (waits === undefined) this.#deletedAhead.set(id, [wait]);
           else waits.push(wait);
           wait.remaining++;
-        } else if (!e.deleted) {
-          // An element still waiting for its origin is placed as a tombstone when it's placed.
-          if (e.run.placed) targets.add(e);
-          else e.deleted = true;
+        } else {
+          // The last delete naming it counts: one logged later than the first must not find it collected.
+          e.deletedAt = Math.max(e.deletedAt, stamp);
+          if (!e.deleted) {
+            // An element still waiting for its origin is placed as a tombstone when it's placed.
+            if (e.run.placed) targets.add(e);
+            else e.deleted = true;
+          }
         }
       }
     }
@@ -661,14 +702,115 @@ export class Rga {
         if (e.deleted) tombstones.push(e);
       }
     }
+    // A run whose end was collected is written as what's left of it.
     const ops: Op[] = [...runs]
       .sort((a, b) => compareIds(a.op.id, b.op.id))
-      .map((run) => validateOp(run.op));
+      .map((run) =>
+        validateOp(
+          run.elements.length === Array.from(run.op.text).length
+            ? run.op
+            : { ...run.op, text: run.elements.map((e) => e.char).join('') },
+        ),
+      );
     const spans = spansOf(tombstones);
     for (let i = 0; i < spans.length; i += MAX_SPANS) {
       ops.push({ type: 'delete', spans: spans.slice(i, i + MAX_SPANS) });
     }
     return ops;
+  }
+
+  /**
+   * Takes out every tombstone that is a leaf and was last deleted by a delete stamped from 1 to `upTo`, and then
+   * every one that becomes a leaf that way (DESIGN.md "Tombstones"). A leaf is the last element of its run that no
+   * run names as its origin (an element's run successor names it implicitly). RGA places an insert just after its
+   * origin, past every larger id; where a leaf tombstone was the first smaller id, the element after it is smaller
+   * still, so removing it changes where nothing goes, as long as no operation still to arrive names it: that is the
+   * caller's to know (the server collects only tombstones deleted before the log it keeps, and resyncs a client that
+   * names one). The ids are kept as collected (collectedSpans). Returns how many elements went.
+   */
+  collect(upTo: number): number {
+    const eligible = (e: Element) =>
+      e.deleted &&
+      !e.gone &&
+      e.deletedAt > 0 &&
+      e.deletedAt <= upTo &&
+      e.childRuns === 0 &&
+      e.run.elements.at(-1) === e &&
+      !this.#waiting.has(e.id);
+    const stack: Element[] = [];
+    for (const block of this.#blocks)
+      for (const e of block.elements) if (eligible(e)) stack.push(e);
+    const removed: Id[] = [];
+    const touched = new Set<Block>();
+    while (stack.length > 0) {
+      const e = stack.pop() as Element;
+      if (!eligible(e)) continue;
+      e.gone = true;
+      e.run.elements.pop();
+      this.#known.delete(e.id);
+      touched.add(e.block as Block);
+      removed.push(e.id);
+      const before = e.run.elements.at(-1);
+      if (before !== undefined) {
+        if (eligible(before)) stack.push(before);
+      } else if (e.run.op.origin !== null) {
+        // The whole run is gone: its origin has one child run fewer.
+        const origin = this.#known.get(e.run.op.origin);
+        if (origin !== undefined) {
+          origin.childRuns--;
+          if (eligible(origin)) stack.push(origin);
+        }
+      }
+    }
+    if (removed.length === 0) return 0;
+    for (const block of touched) {
+      let kept = 0;
+      for (const e of block.elements) if (!e.gone) block.elements[kept++] = e;
+      block.elements.length = kept;
+    }
+    this.#blocks = this.#blocks.filter((block) => block.elements.length > 0);
+    this.#placed -= removed.length;
+    this.#collected.addAll(removed);
+    return removed.length;
+  }
+
+  /** The ids collected, as spans (each at most MAX_SPAN_LENGTH), by replica then counter: for snapshots. */
+  collectedSpans(): Span[] {
+    return this.#collected.spans(MAX_SPAN_LENGTH);
+  }
+
+  /**
+   * Records ids as collected (a replica rebuilt from a snapshot: its collected spans). Throws RangeError if this
+   * replica holds any of them. This replica's own ids move its clock past them, so it never makes them again.
+   */
+  markCollected(spans: readonly Span[]): void {
+    for (const span of spans) {
+      for (let i = 0; i < span.length; i++) {
+        if (this.#known.has({ replica: span.replica, counter: span.counter + i })) {
+          throw new RangeError(`${span.counter + i}@${span.replica} is held here, not collected`);
+        }
+      }
+    }
+    for (const span of spans) {
+      this.#collected.addSpan(span.replica, span.counter, span.length);
+      if (span.replica === this.replica) {
+        this.#clock = Math.max(this.#clock, span.counter + span.length - 1);
+      }
+    }
+  }
+
+  /** Whether `op` names a collected id: an insert's own ids or origin, any id a delete names. */
+  namesCollected(op: Op): boolean {
+    if (op.type === 'insert') {
+      const last = op.id.counter + Array.from(op.text).length - 1;
+      return (
+        this.#collected.overlaps(op.id.replica, op.id.counter, last) ||
+        (op.origin !== null && this.#collected.has(op.origin))
+      );
+    }
+    return op.spans.some((s) =>
+      this.#collected.overlaps(s.replica, s.counter, s.counter + s.length - 1),
+    );
   }
 
   /**
@@ -683,11 +825,18 @@ export class Rga {
       for (const run of this.#waiting.get(id) as Run[]) waiting.push(run);
     waiting.sort((a, b) => compareIds(a.op.id, b.op.id));
     const runs = waiting.map((run) => run.elements.map(describe).join(' '));
-    return [
+    const parts = [
       this.#blocks.flatMap((block) => block.elements.map(describe)).join(' '),
       `waiting ${runs.join(', ')}`,
       `deleted ahead ${this.#deletedAhead.ids().map(formatId).join(' ')}`,
-    ].join(' | ');
+    ];
+    if (this.#collected.size > 0) {
+      const spans = this.#collected.spans(Number.MAX_SAFE_INTEGER);
+      parts.push(
+        `collected ${spans.map((x) => `${x.counter}+${x.length}@${x.replica}`).join(' ')}`,
+      );
+    }
+    return parts.join(' | ');
   }
 }
 
