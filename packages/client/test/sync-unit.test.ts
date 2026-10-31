@@ -447,6 +447,24 @@ describe('failures', () => {
     assert.equal(client.rga.text(), 'still works offline');
   });
 
+  test('an error with no close after it is retried, and a close that comes later is ignored', async () => {
+    // Node's WebSocket after a refused connection: error, then nothing, readyState CONNECTING for good.
+    const { client, sockets, latest } = setup();
+    client.start();
+    const first = latest();
+    first.onerror?.({});
+    assert.equal(client.status, 'offline');
+    assert.match(client.detail, /^connection failed; retrying/);
+    assert.equal(first.closedWith, undefined, 'closed with no code');
+    assert.equal(first.readyState, 3);
+    await nextTick();
+    assert.equal(sockets.length, 2);
+    first.drop();
+    await nextTick();
+    assert.equal(sockets.length, 2, 'the late close started nothing');
+    client.stop();
+  });
+
   test('a connect that throws is retried', async () => {
     let calls = 0;
     const client = new SyncClient({

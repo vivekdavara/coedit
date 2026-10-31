@@ -256,8 +256,14 @@ export class SyncClient {
       this.#drop();
       this.#retry(event.code === 1006 ? 'connection lost' : `closed (${event.code})`);
     };
-    // An error is followed by a close, which does the work.
-    socket.onerror = () => {};
+    // A browser follows an error with a close, but Node's WebSocket (23.11) doesn't after a refused connection: it
+    // fires error and stays CONNECTING for good. So an error drops the socket itself; a close after it is ignored.
+    socket.onerror = () => {
+      if (this.#socket !== socket) return;
+      this.#drop();
+      socket.close();
+      this.#retry('connection failed');
+    };
   }
 
   #receive(message: ServerMessage): void {
@@ -355,6 +361,7 @@ export class SyncClient {
       socket.onopen = null;
       socket.onmessage = null;
       socket.onclose = null;
+      socket.onerror = null;
     }
     this.#socket = null;
     this.#target = null;
