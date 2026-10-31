@@ -115,6 +115,8 @@ export class SyncClient {
   /** This client's selection as ids (what it last sent or will send), and everyone else's. */
   #cursor: Cursor | null = null;
   readonly #remote = new Map<string, Cursor>();
+  /** While hold() is on: `ops` messages received and not yet applied. */
+  #held: (ServerMessage & { type: 'ops' })[] | null = null;
 
   constructor(options: SyncOptions, events: SyncEvents = {}) {
     this.doc = options.doc;
@@ -185,6 +187,25 @@ export class SyncClient {
     const first = this.#outbox.length;
     for (const op of ops) this.#outbox.push({ op, text: encodeOp(op) });
     if (this.#live) this.#flush(first);
+  }
+
+  /**
+   * Holds remote operations: received, not applied, until release(). For an IME composition, while the browser
+   * owns the textarea: the edit made when it ends is found against the text from before it, so the replica must
+   * still hold that text then. Edits made meanwhile apply and are sent as usual.
+   */
+  hold(): void {
+    this.#held ??= [];
+  }
+
+  /** Applies what hold() kept, in order, and stops holding. */
+  release(): void {
+    const held = this.#held;
+    this.#held = null;
+    for (const message of held ?? []) {
+      if (this.#status === 'failed') return;
+      this.#receive(message);
+    }
   }
 
   /** This client's selection moved (code points), or null: hidden. Sent to the others when it changes. */
@@ -286,6 +307,10 @@ export class SyncClient {
         return;
       }
       case 'ops': {
+        if (this.#held !== null) {
+          this.#held.push(message);
+          return;
+        }
         if (this.#target === null || message.from !== this.#seq + 1) {
           this.#fail(`log entries from ${message.from}, but ${this.#seq} were applied`);
           return;
@@ -367,6 +392,8 @@ export class SyncClient {
     this.#target = null;
     this.#live = false;
     this.#sent = 0;
+    // Entries held from this connection come again on the next (its hello asks from the last one applied).
+    if (this.#held !== null) this.#held = [];
     if (this.#remote.size > 0) {
       // The server sends the cursors shown again on the next join.
       this.#remote.clear();

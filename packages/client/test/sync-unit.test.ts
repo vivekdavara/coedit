@@ -251,6 +251,61 @@ describe('the outbox', () => {
   });
 });
 
+describe('hold and release', () => {
+  test('holds remote operations until released, while local edits go out', () => {
+    const changes: unknown[][] = [];
+    const { client, latest } = setup({ changes });
+    client.start();
+    latest().open();
+    latest().receive(welcome(0));
+    latest().take();
+    client.hold();
+    latest().receive({ type: 'ops', from: 1, ops: [insert(1, 'x', null, 'ab')] });
+    assert.equal(client.rga.text(), '');
+    assert.equal(client.seq, 0);
+    client.edit(0, 0, '漢');
+    assert.equal(latest().take().length, 1, 'the edit was sent');
+    client.release();
+    assert.equal(client.seq, 1);
+    // Both at HEAD; 1@x is the larger id, so it goes first.
+    assert.deepEqual(changes, [[{ type: 'insert', index: 0, text: 'ab' }]]);
+    assert.equal(client.rga.text(), 'ab漢');
+  });
+
+  test('a dropped connection discards what was held: the next one sends it again', async () => {
+    const { client, latest } = setup();
+    client.start();
+    latest().open();
+    latest().receive(welcome(0));
+    client.hold();
+    latest().receive({ type: 'ops', from: 1, ops: [insert(1, 'x', null, 'ab')] });
+    latest().drop();
+    await nextTick();
+    latest().open();
+    assert.deepEqual(latest().take(), [
+      { type: 'hello', protocol: 1, doc: 'd', replica: 'me', have: 0 },
+    ]);
+    latest().receive(welcome(1));
+    latest().receive({ type: 'ops', from: 1, ops: [insert(1, 'x', null, 'ab')] });
+    client.release();
+    assert.equal(client.status, 'online');
+    assert.equal(client.rga.text(), 'ab');
+  });
+
+  test('stops releasing at a failure', () => {
+    const { client, latest } = setup();
+    client.start();
+    latest().open();
+    latest().receive(welcome(0));
+    client.hold();
+    latest().receive({ type: 'ops', from: 2, ops: [insert(1, 'x', null, 'a')] });
+    latest().receive({ type: 'ops', from: 3, ops: [insert(2, 'x', [1, 'x'], 'b')] });
+    client.release();
+    assert.equal(client.status, 'failed');
+    assert.match(client.detail, /from 2, but 0 were applied/);
+  });
+});
+
 describe('presence', () => {
   test('sends its cursor when it changes and again after reconnecting, after its operations', async () => {
     const { client, latest } = setup();
