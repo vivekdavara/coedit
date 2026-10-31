@@ -6,15 +6,7 @@ import { startServer, type SyncServer } from '@coedit/server';
 import type { Change } from '@coedit/crdt';
 import { SyncClient, type Status } from '../src/sync.ts';
 import { applyEdit } from '../src/edit.ts';
-
-/** Waits until `condition` holds, checking every 5 ms, for up to `ms`. */
-export async function eventually(condition: () => boolean, ms = 10_000): Promise<void> {
-  const deadline = Date.now() + ms;
-  while (!condition()) {
-    if (Date.now() > deadline) throw new Error(`not within ${ms} ms`);
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-}
+import { eventually } from './helpers.ts';
 
 let docs = 0;
 const freshDoc = () => `doc-${++docs}`;
