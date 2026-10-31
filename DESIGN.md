@@ -281,16 +281,18 @@ Client to server:
 
 Server to client:
 
-| Message    | Fields                   | Meaning                                                            |
-| ---------- | ------------------------ | ------------------------------------------------------------------ |
-| `welcome`  | `protocol`, `doc`, `seq` | joined; the log currently ends at `seq`                            |
-| `ops`      | `from`, `ops`            | log entries `from`, `from + 1`, ... (missed ones first, then live) |
-| `snapshot` | `seq`, `ops`, `last`     | day 4: the document after entry `seq`, for a client too far behind |
-| `presence` | `replica`, `cursor`      | someone's selection (`cursor: null`: they left or hid it)          |
-| `error`    | `code`, `message`        | refused; the server closes the connection after it                 |
+| Message     | Fields                   | Meaning                                                            |
+| ----------- | ------------------------ | ------------------------------------------------------------------ |
+| `welcome`   | `protocol`, `doc`, `seq` | joined; the log currently ends at `seq`                            |
+| `ops`       | `from`, `ops`            | log entries `from`, `from + 1`, ... (missed ones first, then live) |
+| `snapshot`  | `seq`, `ops`, `last`     | day 4: the document after entry `seq`, for a client too far behind |
+| `collected` | `spans`                  | day 4: ids the document has collected, before a snapshot's parts   |
+| `presence`  | `replica`, `cursor`      | someone's selection (`cursor: null`: they left or hid it)          |
+| `error`     | `code`, `message`        | refused; the server closes the connection after it                 |
 
 Error codes: `malformed`, `unsupported-protocol`, `unexpected-message`, `refused-op`, `too-large` (the document is
-full), `ahead-of-server` (below) and `server-error`, the only one a client retries after.
+full), `ahead-of-server` (below), `server-error`, the only one a client retries after as is, and (day 4) `resync`, after
+which it rejoins asking for a snapshot ("Tombstones").
 
 - **The server orders.** It numbers every operation it accepts 1, 2, 3, ... in its log and relays each one to every
   client of the document, the sender included. The echo is the acknowledgement: a client drops an operation from its
@@ -452,17 +454,23 @@ are two documents.
   every entry); the hub logs it and goes on.
 - **A client too far behind** (its `have` is older than the oldest entry kept, `base`) gets, after `welcome`, the
   document as it is at the join, as `snapshot` messages (each at most 1,000 operations and 1 MiB, the last marked
-  `last`), then the log from there. The client merges each part into its replica and moves to the snapshot's sequence
-  number only at the last part, so a connection dropped part way asks again from where it was.
+  `last`), preceded by `collected` messages if the document has collected tombstones ("Tombstones" below), then the
+  log from there. So does a client asking for everything (`have` 0) where something was collected. The client builds
+  a new replica from the parts (the collected ids marked in it, its old clock kept so its own next ids stay new) and
+  swaps it in only at the last part, so a connection dropped part way asks again from where it was. Merging the
+  snapshot into the old replica would not do once tombstones are collected: the snapshot doesn't hold a collected
+  tombstone's delete, and a client behind could still show that text.
 - **The outbox after a snapshot.** The client's unacknowledged operations that the server logged before the snapshot
   will never be echoed to it (their echoes were in the entries the snapshot replaces). The snapshot holds what the
-  server had logged by its sequence number, so the client drops from its outbox every insert whose run is in the
-  snapshot and every delete all of whose ids are tombstones in it, and sends the rest. An insert in the snapshot
-  was logged, since the server holds only what it logged. A delete whose effect is in the snapshot may not have
-  been logged (another client's delete of the same text), but it needs no echo: it changes nothing anywhere now.
-  Nothing logged after the snapshot can be in it, and nothing of this connection's outbox has been sent yet (the
-  client sends it once caught up), so every operation dropped is one whose echo would never come, and every one kept
-  is still to be logged.
+  server had logged by its sequence number, collected ids included, so the client goes over its outbox in order
+  against the new replica: an insert whose ids it holds or collected, and a delete all of whose ids are its tombstones
+  or collected, leave the outbox; the rest are applied to the new replica and sent. An insert in the snapshot was
+  logged, since the server holds only what it logged. A delete whose effect is in the snapshot may not have been
+  logged (another client's delete of the same text), but it needs no echo: it changes nothing anywhere now. Nothing
+  logged after the snapshot can be in it, and nothing of this connection's outbox has been sent yet (the client sends
+  it once caught up), so every operation dropped is one whose echo would never come, and every one kept is still to
+  be logged. A kept delete loses the collected ids it named (they're deleted already); a kept insert whose origin was
+  collected is re-anchored ("Tombstones"). The editor gets the difference between the old text and the new.
 - **A failed append** (a full disk) leaves the replica holding operations the disk may not hold. The hub closes
   every member with `server-error` (which clients retry) and refuses everything after; the server drops it, and the
   next join loads the document from what reached the disk. Nothing of the failed message was relayed, and its sender
@@ -475,34 +483,46 @@ are two documents.
   as the wire format checks a message, which catches a torn or garbled line but not a character changed to another
   valid one).
 
-## Tombstones (day 4: measured, not collected)
+## Tombstones (day 4)
 
 A delete leaves a tombstone, and tombstones grow without bound: in the synthetic 100,000-edit session of
-`npm run editing -w @coedit/crdt` 45% of the elements are tombstones at the end (69% at 20,000 edits), and each
-element takes about 186 bytes of heap. Day 4 was to collect them; it measured them instead, and collecting is not
-built. What collecting needs, worked out on day 4:
+`npm run editing -w @coedit/crdt` there are 112,386 at the end, about a third of the elements. The server collects
+the ones it can prove nothing will need, by the **leaf rule** (built after day 4's session, on Vivek's go-ahead):
 
 - **When removing one changes nothing.** Placement is RGA's skip rule: just after the origin, past every larger id,
-  stop at the first smaller one. A tombstone T that no element names as its origin, and that no operation still to
-  arrive names (as an origin or in a delete), can go: wherever T was the first smaller id an insert stopped at, the
-  element after T has an id smaller still (it's T's next sibling, or comes after T's subtree, whose first element is
-  smaller than every id in it), so the insert stops at the same place. A tombstone whose children are all collected
-  becomes such a leaf in turn. Replicas that keep T and replicas that dropped it then place every future insert the
-  same way, so they needn't collect at the same time.
-- **Knowing nothing still to arrive names it** is the hard part. Only a replica that hadn't applied T's delete when
-  it made an operation can name T, so the server needs to know, for every replica that may still send, that
-  everything it made before applying T's delete has arrived. For connected clients that takes a new message: "I have
-  applied the log up to n", sent after the outbox (the socket keeps order, so whatever the client made before
-  applying entry n arrives first). Clients that are offline can come back at any time with anything; the server
-  can't wait for them forever, so it keeps a retention window (entries or days), collects past it, and a client
-  returning with a `have` older than what was collected must be resynced: its outbox operations that name collected
-  elements are re-anchored (an insert whose origin is gone takes the nearest earlier element the server still has,
-  under the same id, since the server never logged it) or dropped (a delete of something already gone). Its text
-  survives; the exact placement of its offline inserts next to deleted text may not.
-- That is a protocol change (the new message, a `resync` path, the client's re-anchoring) plus the server's
-  bookkeeping of which tombstones are leaves and when each was deleted. It was not built on day 4; persistence and
-  the end-to-end tests were. Until then a tombstone's cost is its element: about 186 bytes of heap and, in a snapshot,
-  its part of the run that carries it.
+  stop at the first smaller one. A tombstone T that is the last element of its run, that no run names as its origin,
+  and that no operation still to arrive names (as an origin or in a delete), can go: wherever T was the first smaller
+  id an insert stopped at, the element after T has an id smaller still (it's T's next sibling, or comes after T's
+  subtree, whose first element is smaller than every id in it), so the insert stops at the same place. A tombstone
+  whose children are all collected becomes such a leaf in turn: a run goes from its end, then its origin once no run
+  names it (`Rga.collect`). Replicas that keep T and replicas that dropped it then place every future insert the same
+  way, so clients needn't collect at all; only the server does.
+- **What can still name it.** Only a replica that hadn't applied T's last delete when it made an operation. Every
+  operation the server applies is stamped with the log entry it becomes, and each element keeps the stamp of the last
+  delete naming it. At each snapshot the server collects the leaf tombstones whose last delete is in an entry that
+  snapshot lets go of (`collect(keepFrom - 1)`): every client that will catch up from the log has applied it, and one
+  further behind gets a snapshot. Nothing in the kept log names a collected element (an insert after it would have
+  made it a non-leaf, a later delete would have stamped it later), so a reload replays cleanly.
+- **A client that names one anyway** (it made the operation before it saw the delete, and sends it after the
+  collection: an offline client, mostly) is refused with `resync`, the server changing nothing. Its next hello asks
+  for everything, and it rebuilds from a snapshot ("The outbox after a snapshot"); an unsent insert whose origin was
+  collected is re-anchored after the nearest element before it, in the client's old sequence, that the new replica
+  holds with a smaller id, which keeps the operation valid under its own id (no one has seen it). Its text survives;
+  its place next to deleted text may move.
+- **Kept.** The collected ids are kept as ranges (`IdRanges`): to refuse operations naming them, to skip them in
+  deletes, and to tell a client rebuilding from a snapshot that an outbox insert under one was logged. They go into
+  the snapshot file after its operations and to clients in `collected` messages before a snapshot's parts.
+- **Measured** (README "Results (day 4)"): with every delete old enough, the leaf rule takes 35,414 of the 112,386
+  tombstones of the 100,000-edit session (31.5%) in 28 to 33 ms (two runs); the snapshot shrinks from 10.2 MB to 7.2 MB. The heap
+  barely moves: the bookkeeping (each element's stamp and child count) costs about 17 bytes an element, 229 against
+  212, which most of what it saves pays for.
+- **What the leaf rule leaves.** A stretch deleted from the middle of text typed one character at a time: each
+  character is the origin of the next, and the last deleted one is the origin of the text after the stretch, so no
+  tombstone in it is ever a leaf. Typos (typed, then backspaced before anything followed) are what it collects.
+  Collecting the rest would take a stronger rule: a tombstone can go whenever the element after it is older than any
+  insert the server will still accept, which means refusing old inserts with `resync`, re-issuing a returning
+  client's edits under new ids, and writing snapshot runs with rewritten origins (where nothing depends on the
+  original ones: placement uses only the sequence's order). Not built.
 
 ## End to end (day 4)
 
@@ -517,7 +537,7 @@ at one spot at once (each run whole), one offline while both edit and back, and 
 | 1   | this design; workspaces, CI; the wire format and its strict decoder; the network simulator and its self-test; the client's edit mapping |
 | 2   | the CRDT (ids, Lamport clock, insert, delete, tombstones, pending operations); convergence properties                                   |
 | 3   | the sync server and React client; presence; offline buffering and reconnect                                                             |
-| 4   | persistence (snapshots + op log); Playwright e2e with two browsers; ops/sec, document growth (tombstone GC: designed, not built)        |
+| 4   | persistence (snapshots + op log); tombstone GC (the leaf rule); Playwright e2e with two browsers; ops/sec, document growth              |
 | 5   | README with results, WALKTHROUGH.md, v1.0.0                                                                                             |
 
 ## Decisions

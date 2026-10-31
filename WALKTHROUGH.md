@@ -423,10 +423,11 @@ its sequence number only at the last, so a drop part way just asks again.
 **What happens to the client's outbox when it gets a snapshot?** That's the subtle part. Operations of its own that
 the server logged before the snapshot will never be echoed to it (their echoes were in the entries the snapshot
 replaces), so the client would wait for them forever. The snapshot holds exactly what the server had logged by then,
-so the client drops every insert whose run is in it and every delete all of whose ids are tombstones in it, and sends
-the rest. A delete whose effect is there may not have been logged (someone else deleted the same text), but it needs
-no echo: it changes nothing anywhere. `sync-unit.test.ts` has the cases, including a delete only partly covered,
-which stays.
+collected ids included, so the client goes over its outbox against the replica it builds from the snapshot: every
+insert whose ids are in it or collected, and every delete all of whose ids are tombstones there or collected, leave;
+the rest are applied and sent. A delete whose effect is there may not have been logged (someone else deleted the same
+text), but it needs no echo: it changes nothing anywhere. `sync-unit.test.ts` has the cases, including a delete only
+partly covered, which stays.
 
 **What does a full disk do?** The append throws. The replica already has the message's operations and the disk may
 not, so the hub can't go on: it sends `server-error` to every member (clients retry that), refuses everything, and the
@@ -468,14 +469,36 @@ characters per run).
 
 ## Tombstones (day 4)
 
-**Why aren't tombstones collected?** Because knowing when one is safe to remove is the hard part, and day 4 built
-persistence instead. Removing a tombstone changes nothing if no element has it as its origin and no operation still
-to arrive names it: RGA places an insert just after its origin, past every larger id, so where a childless tombstone
-was the first smaller id, the element after it is smaller still, and the insert stops at the same place. But only the
-server's view of every client that may still send can say "nothing will name it", and an offline client can return
-any time with operations made before it saw the delete. That needs a client message ("I have applied up to n", after
-its outbox), a retention window, and a resync for a client returning past it that re-anchors its offline inserts.
-DESIGN.md "Tombstones" has it; it's the main thing left in the CRDT.
+**Do you collect tombstones?** On the server, by the leaf rule (finished after day 4's session). A tombstone that is
+the last element of its run, that no run names as its origin, and that nothing still to arrive names can go: RGA
+places an insert just after its origin, past every larger id, and where such a tombstone was the first smaller id,
+the element after it is smaller still, so every future insert lands in the same place with or without it. So only the
+server needs to collect; clients that keep the tombstone place everything the same way (`rga-collect.test.ts` checks
+exactly that against a replica that never collects).
+
+**How does the server know nothing will name it?** It doesn't know about offline clients, so it settles for "nothing
+that catches up from the log will": every operation is stamped with its log entry, each element keeps the stamp of
+the last delete naming it, and at each snapshot the server collects leaves whose last delete is in an entry the
+snapshot lets go of. A client that catches up from the log has applied that delete, and one further behind gets a
+snapshot. One that names a collected element anyway (made before it saw the delete, sent after) gets `resync`: it
+rejoins asking for everything, rebuilds from a snapshot, and re-anchors its unsent insert after the nearest earlier
+element the server still has with a smaller id, so the operation stays valid under its own id.
+
+**How much does it collect?** A third: 35,414 of 112,386 tombstones in the synthetic 100,000-edit session, and the
+snapshot shrinks 30%. Not more, because a stretch deleted from the middle of typed text is a chain where each
+character is the next one's origin and the last is the origin of what follows: none is ever a leaf. Typos are what
+it collects. And the heap barely shrinks, because each element now carries a stamp and a child count (about 17 bytes).
+
+**What would collect the rest?** A tombstone can go whenever the element after it is older than any insert the server
+will still accept. That means refusing old inserts with `resync`, re-issuing a returning client's edits under new
+ids, and writing snapshot runs with rewritten origins (placement only uses the order of the sequence, not the
+origins). I asked Vivek whether to build that too; the leaf rule shipped, and the rest is in DESIGN.md.
+
+**What changed for the client?** It used to merge a snapshot into its replica; now it builds a new one, because a
+collected tombstone's delete isn't in the snapshot, and a client behind could still show that text. Its outbox is
+gone over against the new replica: what the snapshot holds or collected was logged and leaves, the rest is applied
+and sent. `sync-convergence.test.ts` runs its random schedules on a server snapshotting every 3 entries to exercise
+it.
 
 ## Testing end to end (day 4)
 

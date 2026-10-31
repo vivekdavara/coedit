@@ -19,8 +19,9 @@ anything is relayed, snapshots that are lists of ordinary operations, recovery t
 anything else it can't read back, snapshots sent to clients too far behind the log, idle documents unloaded;
 Playwright with two browsers editing at once and offline; measurements of the CRDT's speed, a document's growth, and
 what storage costs, and from them the element array replaced by counted blocks (about 175 times faster at 369,000
-elements) (day 4). Tombstone collection was designed on day 4 but not built (DESIGN.md "Tombstones").
-Next: release (day 5).
+elements); and tombstone collection by the leaf rule, with clients rebuilding from snapshots and a `resync` for one
+that names a collected element (day 4, the collection finished after the session on Vivek's go-ahead). Next: release
+(day 5).
 
 ## Architecture
 
@@ -176,7 +177,14 @@ mine running unless said. The editing session is synthetic (a seeded random mode
 - **A SIGKILL while a client types** (`packages/server/test/crash.test.ts`): three rounds of 300 characters sent one
   a message, the server killed after 100 echoes and started again on the same directory; every round the restarted
   log held at least every echoed entry, and the next round's reader found the log exactly a prefix of what was typed.
-- **Tests**: 382 at the start of the day (`6484624`, `npm test`), 443 at `477dd82`.
+- **Tombstone collection** (`npm run editing -w @coedit/crdt`, the same session, at `2a26ec5`; a server's replica
+  with every delete old enough): the leaf rule takes 35,414 of 112,386 tombstones (31.5%) in 28 to 33 ms (two runs),
+  368,852 elements to 333,438, kept as 8,809 collected spans; the snapshot goes from 10,231,290 bytes to 7,168,496. A
+  replica rebuilt from the snapshot takes 229 bytes of heap an element against 212 before the collection's bookkeeping
+  (237 with a flag it turned out not to need), so the heap falls only about 2% (333,438 x 229 against 368,852 x 212).
+  On the real server with a snapshot every 3 entries, the convergence property ran 60 documents four times: 35 to 41
+  collected something, 79 to 96 clients ended rebuilt from a snapshot, and every one converged.
+- **Tests**: 382 at the start of the day (`6484624`, `npm test`), 443 at `477dd82`, 494 at `2a26ec5`.
 
 ## Results (day 3)
 
@@ -380,6 +388,14 @@ Measured on an Apple M3 (macOS 26.6.2, Node 23.11.0, on AC, awake throughout). A
   after), and that the hub relays only after the sync.
 - `packages/client/test/sync.test.ts` (day 4 additions): a server restarted on its data directory, and a client far
   behind rejoining through a snapshot with logged and unsent edits, both against the real server.
+- `packages/crdt/test/rga-collect.test.ts` (day 4, collection): three clients edit and sync while a server replica
+  collects what every client has applied the deletes of; a reference that never collects must report the same change
+  for every entry and the same text and positions (400 sessions, and with blocks of 1 and 2); a snapshot plus its
+  collected ids rebuilds the state exactly; the cascade, stamps, waiting runs, refusals.
+- `packages/server/test/collect.test.ts` (day 4): a typo collected once its delete is let go of, a middle stretch
+  not; the snapshot file and a reload; a fresh member gets `collected`, then the snapshot; `resync`.
+- `packages/client/test/sync-unit.test.ts`, "collected ids", and `sync-convergence.test.ts`'s second property (day 4):
+  acknowledgement by collected ids, re-anchoring, `resync`; convergence on a stored server collecting every 3 entries.
 - `packages/client/e2e/two-browsers.spec.ts` (day 4): see Results.
 - `review-d4-*.test.ts` (day 4): the review's findings, each of which failed before its fix.
 - `review1-*.test.ts`, `review2-*.test.ts`: the reviews' findings, each of which failed before its fix.
@@ -603,9 +619,14 @@ support this machine's Node 23).
 
 ## Limitations (day 4)
 
-- **Tombstones are never collected.** 45% of the elements at the end of the synthetic 100,000-edit session, at about
-  186 bytes of heap each. DESIGN.md "Tombstones" has the rule that makes removing one safe and what knowing it's safe
-  needs (an "applied up to" message, a retention window, a resync for clients returning past it); none of it is built.
+- **Tombstones are collected only by the leaf rule**: 31.5% of them in the synthetic 100,000-edit session. A stretch
+  deleted from the middle of text typed one character at a time is never a leaf, so it stays; the stronger rule that
+  would take it (refusing old inserts, re-issuing a returning client's edits under new ids, rewriting snapshot
+  origins) is in DESIGN.md "Tombstones", not built. The bookkeeping costs about 17 bytes of heap an element, so the
+  heap barely shrinks (the snapshot does, by 30%). Only the server collects; clients keep their tombstones until they
+  rebuild from a snapshot.
+- **A client resynced or far behind rebuilds its whole replica** from a snapshot, and an unsent insert whose origin
+  was collected is re-anchored: its text survives, its place next to deleted text may move.
 - **Positions are found in blocks, not a tree**: about n / 512 + 512 steps an operation, flat at the sizes measured
   (256,670 local edits a second at 369,000 elements), but still linear in the number of blocks. Loading a document
   blocks the server's event loop (344 to 481 ms for 100,000 entries), and every client of every document waits.
