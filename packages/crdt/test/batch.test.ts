@@ -16,6 +16,7 @@ import {
   encodeOp,
   encodeServerMessage,
   encodeServerOps,
+  encodeServerSnapshot,
   utf8Length,
   type Op,
 } from '../src/protocol.ts';
@@ -142,6 +143,12 @@ describe('batchOps', () => {
           utf8Length(message) <= MAX_MESSAGE_BYTES,
           `${utf8Length(message)} bytes (total ${total}, comma ${comma})`,
         );
+        // A snapshot's envelope is the longer of the two (64 bytes with "last":false).
+        const snapshot = encodeServerSnapshot(Number.MAX_SAFE_INTEGER, batch, false);
+        assert.ok(
+          utf8Length(snapshot) <= MAX_MESSAGE_BYTES,
+          `snapshot: ${utf8Length(snapshot)} bytes (total ${total}, comma ${comma})`,
+        );
       }
     }
   });
@@ -162,6 +169,36 @@ describe('batchOps', () => {
           MAX_MESSAGE_BYTES,
       );
     }
+  });
+});
+
+describe("the server's snapshot message", () => {
+  const one = encodeOp(ins(1, 'a'));
+
+  test('is the text encodeServerMessage writes, and decodes back', () => {
+    for (const [seq, texts, last] of [
+      [0, [], true],
+      [5, [one], false],
+      [Number.MAX_SAFE_INTEGER, [one, one], true],
+    ] as const) {
+      const text = encodeServerSnapshot(seq, texts, last);
+      const ops = texts.map((t) => JSON.parse(t) as Op);
+      assert.equal(text, encodeServerMessage({ type: 'snapshot', seq, ops, last }));
+      assert.deepEqual(decodeServerMessage(text), { type: 'snapshot', seq, ops, last });
+    }
+  });
+
+  test('may be empty, but not over MAX_OPS operations or a sequence number past the safe range', () => {
+    assert.doesNotThrow(() => encodeServerSnapshot(3, [], true));
+    assert.throws(
+      () => encodeServerSnapshot(3, Array<string>(MAX_OPS + 1).fill(one), true),
+      /0 to 1000 operations/,
+    );
+    assert.throws(() => encodeServerSnapshot(-1, [one], true), ProtocolError);
+    assert.throws(
+      () => encodeServerSnapshot(Number.MAX_SAFE_INTEGER + 1, [one], true),
+      ProtocolError,
+    );
   });
 });
 

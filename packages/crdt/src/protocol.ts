@@ -96,6 +96,19 @@ export interface ServerOps {
   readonly ops: readonly Op[];
 }
 
+/**
+ * Part of a snapshot (day 4): operations that rebuild the document as it was after log entry `seq` (Rga.snapshot),
+ * sent instead of the log to a client whose `have` is older than the oldest entry the server keeps. A long snapshot
+ * takes several messages, the last with `last: true`; the client has the state after `seq` only then, and the log
+ * goes on from `seq + 1`. Unlike `ops`, one may carry no operations (a snapshot of an empty document).
+ */
+export interface ServerSnapshot {
+  readonly type: 'snapshot';
+  readonly seq: number;
+  readonly ops: readonly Op[];
+  readonly last: boolean;
+}
+
 export interface ServerPresence {
   readonly type: 'presence';
   readonly replica: string;
@@ -121,7 +134,7 @@ export interface ErrorMessage {
   readonly message: string;
 }
 
-export type ServerMessage = Welcome | ServerOps | ServerPresence | ErrorMessage;
+export type ServerMessage = Welcome | ServerOps | ServerSnapshot | ServerPresence | ErrorMessage;
 
 /** A message that isn't exactly as specified. `path` names the field, e.g. `ops[2].origin.counter`. */
 export class ProtocolError extends Error {
@@ -181,6 +194,18 @@ export function encodeOp(value: Op): string {
 export function encodeClientOps(texts: readonly string[]): string {
   checkBatch(texts);
   return `{"type":"ops","ops":[${texts.join(',')}]}`;
+}
+
+/**
+ * The server's `snapshot` message from operations already written by encodeOp (none is allowed). Its envelope with
+ * the largest `seq` and `"last":false` is 64 bytes, so batches from batchEnd fit it too (batch.test.ts checks).
+ */
+export function encodeServerSnapshot(seq: number, texts: readonly string[], last: boolean): string {
+  if (texts.length > MAX_OPS) {
+    throw new ProtocolError('ops', `must be 0 to ${MAX_OPS} operations, not ${texts.length}`);
+  }
+  integer(seq, 'seq', 0);
+  return `{"type":"snapshot","seq":${seq},"ops":[${texts.join(',')}],"last":${last}}`;
 }
 
 /** The server's `ops` message, numbered from `from`, from operations already written by encodeOp. */
@@ -284,7 +309,7 @@ function clientMessage(value: JsonValue): ClientMessage {
 }
 
 function serverMessage(value: JsonValue): ServerMessage {
-  const type = messageType(value, ['welcome', 'ops', 'presence', 'error']);
+  const type = messageType(value, ['welcome', 'ops', 'snapshot', 'presence', 'error']);
   switch (type) {
     case 'welcome': {
       const m = fields(value, '', ['type', 'protocol', 'doc', 'seq']);
@@ -303,6 +328,15 @@ function serverMessage(value: JsonValue): ServerMessage {
         throw new ProtocolError('from', 'the last sequence number is past the safe range');
       }
       return { type, from, ops: list };
+    }
+    case 'snapshot': {
+      const m = fields(value, '', ['type', 'seq', 'ops', 'last']);
+      const seq = integer(m['seq'], 'seq', 0);
+      const raw = m['ops'];
+      const list = Array.isArray(raw) && raw.length === 0 ? [] : ops(raw, 'ops');
+      const last = m['last'];
+      if (typeof last !== 'boolean') throw new ProtocolError('last', 'must be true or false');
+      return { type, seq, ops: list, last };
     }
     case 'presence': {
       const m = fields(value, '', ['type', 'replica', 'cursor']);

@@ -395,6 +395,16 @@ describe('the decoder refuses', () => {
       );
     };
     const op = insertOp({});
+    refused({ type: 'snapshot', seq: -1, ops: [], last: true }, 'seq', /from 0/);
+    refused({ type: 'snapshot', seq: 1, ops: [], last: 1 }, 'last', /true or false/);
+    refused({ type: 'snapshot', seq: 1, ops: [] }, 'last', /missing/);
+    refused({ type: 'snapshot', seq: 1, ops: [op], last: true, more: 1 }, 'more', /unknown/);
+    refused({ type: 'snapshot', seq: 1, ops: {}, last: true }, 'ops', /array/);
+    refused(
+      { type: 'snapshot', seq: 1, ops: [{ type: 'insert' }], last: true },
+      'ops[0].id',
+      /missing/,
+    );
     refused({ type: 'ops', from: 0, ops: [op] }, 'from', /from 1/);
     refused({ type: 'ops', from: MAX, ops: [op, op] }, 'from', /past the safe range/);
     decodeServerMessage(JSON.stringify({ type: 'ops', from: MAX, ops: [op] }));
