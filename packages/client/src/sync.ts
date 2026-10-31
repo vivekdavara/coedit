@@ -18,7 +18,9 @@
  *   than `server-error` means retrying would be refused the same way, so the client stops (status `failed`).
  */
 import {
+  CollectedError,
   ConflictError,
+  MAX_SPANS,
   ProtocolError,
   Rga,
   batchOps,
@@ -26,13 +28,16 @@ import {
   encodeClientMessage,
   encodeClientOps,
   encodeOp,
+  formatId,
   sameId,
   type Change,
   type Cursor,
   type Id,
   type Op,
   type ServerMessage,
+  type Span,
 } from '@coedit/crdt';
+import { diffText } from './edit.ts';
 
 /**
  * - `connecting`: opening a connection; `syncing`: joined, applying what was missed; `online`: caught up, edits
@@ -95,7 +100,9 @@ interface Outgoing {
 export class SyncClient {
   readonly doc: string;
   readonly replica: string;
-  readonly rga: Rga;
+  /** The replica; a snapshot replaces it with one built from the server's document (day 4). */
+  #rga: Rga;
+  readonly #capacity: number | undefined;
   readonly #url: string;
   readonly #connect: (url: string) => SocketLike;
   readonly #events: SyncEvents;
@@ -118,20 +125,23 @@ export class SyncClient {
   #cursor: Cursor | null = null;
   readonly #remote = new Map<string, Cursor>();
   /** While hold() is on: `ops` and `snapshot` messages received and not yet applied. */
-  #held: (ServerMessage & { type: 'ops' | 'snapshot' })[] | null = null;
+  #held: (ServerMessage & { type: 'ops' | 'snapshot' | 'collected' })[] | null = null;
   /**
    * A snapshot being received: the first id of each insert in it, and its tombstones' spans by replica. At its last
    * part they say which outbox operations the server had logged (see the 'snapshot' case).
    */
-  #snapshot: { inserts: Set<string>; tombstones: Map<string, [number, number][]> } | null = null;
+  #snapshot: { rga: Rga | null; collected: Span[] } | null = null;
+  /**
+   * Set by a `resync` error (an operation of ours named an element the server has collected): the next hello asks
+   * for everything (`have: 0`), which such a document answers with a snapshot to rebuild from.
+   */
+  #resync = false;
 
   constructor(options: SyncOptions, events: SyncEvents = {}) {
     this.doc = options.doc;
     this.replica = options.replica ?? randomReplica();
-    this.rga = new Rga(
-      this.replica,
-      options.capacity === undefined ? {} : { capacity: options.capacity },
-    );
+    this.#capacity = options.capacity;
+    this.#rga = new Rga(this.replica, this.#rgaOptions(0));
     this.#url = options.url;
     this.#connect = options.connect ?? ((url) => new WebSocket(url) as unknown as SocketLike);
     this.#events = events;
@@ -146,6 +156,11 @@ export class SyncClient {
   /** Why the client failed, or what it is waiting for. */
   get detail(): string {
     return this.#detail;
+  }
+
+  /** The replica (replaced when the client rebuilds from a snapshot). */
+  get rga(): Rga {
+    return this.#rga;
   }
 
   /** The last log sequence number applied. */
@@ -190,7 +205,7 @@ export class SyncClient {
    * Throws RangeError as Rga.edit does (a position outside the text, the replica full).
    */
   edit(index: number, deleteCount: number, text: string): void {
-    const ops = this.rga.edit(index, deleteCount, text);
+    const ops = this.#rga.edit(index, deleteCount, text);
     const first = this.#outbox.length;
     for (const op of ops) this.#outbox.push({ op, text: encodeOp(op) });
     if (this.#live) this.#flush(first);
@@ -220,7 +235,10 @@ export class SyncClient {
     const cursor =
       selection === null
         ? null
-        : { anchor: this.rga.idBefore(selection.anchor), head: this.rga.idBefore(selection.head) };
+        : {
+            anchor: this.#rga.idBefore(selection.anchor),
+            head: this.#rga.idBefore(selection.head),
+          };
     if (sameCursor(cursor, this.#cursor)) return;
     this.#cursor = cursor;
     if (this.#live) this.#send(encodeClientMessage({ type: 'presence', cursor }));
@@ -233,8 +251,8 @@ export class SyncClient {
   remoteSelections(): Map<string, Selection> {
     const selections = new Map<string, Selection>();
     for (const [replica, cursor] of this.#remote) {
-      const anchor = this.rga.indexAfter(cursor.anchor);
-      const head = this.rga.indexAfter(cursor.head);
+      const anchor = this.#rga.indexAfter(cursor.anchor);
+      const head = this.#rga.indexAfter(cursor.head);
       if (anchor !== undefined && head !== undefined) selections.set(replica, { anchor, head });
     }
     return selections;
@@ -259,7 +277,7 @@ export class SyncClient {
           protocol: 1,
           doc: this.doc,
           replica: this.replica,
-          have: this.#seq,
+          have: this.#resync ? 0 : this.#seq,
         }),
       );
     };
@@ -310,7 +328,8 @@ export class SyncClient {
         }
         this.#attempt = 0;
         this.#target = message.seq;
-        if (this.#seq === message.seq) this.#goLive();
+        // Resyncing, a snapshot follows even when nothing is new.
+        if (this.#seq === message.seq && !this.#resync) this.#goLive();
         return;
       }
       case 'ops': {
@@ -330,7 +349,7 @@ export class SyncClient {
             this.#outbox.shift();
           } else {
             try {
-              for (const change of this.rga.apply(op)) changes.push(change);
+              for (const change of this.#rga.apply(op)) changes.push(change);
             } catch (error) {
               if (!(error instanceof ConflictError || error instanceof RangeError)) throw error;
               this.#fail(`this replica refuses log entry ${this.#seq + 1}: ${error.message}`);
@@ -361,48 +380,50 @@ export class SyncClient {
           this.#fail(`a snapshot after entry ${message.seq}, with ${this.#seq} applied`);
           return;
         }
-        const snapshot = (this.#snapshot ??= {
-          inserts: new Set<string>(),
-          tombstones: new Map<string, [number, number][]>(),
-        });
-        const changes: Change[] = [];
-        for (const op of message.ops) {
-          if (op.type === 'insert') snapshot.inserts.add(idKey(op.id));
-          else {
-            for (const span of op.spans) {
-              const list = snapshot.tombstones.get(span.replica);
-              const range: [number, number] = [span.counter, span.counter + span.length - 1];
-              if (list === undefined) snapshot.tombstones.set(span.replica, [range]);
-              else list.push(range);
-            }
-          }
+        const pending = (this.#snapshot ??= { rga: null, collected: [] });
+        if (pending.rga === null) {
+          // A new replica, with this one's clock so its next ids stay new (some of its own may be collected).
+          pending.rga = new Rga(this.replica, this.#rgaOptions(this.#rga.clock));
           try {
-            for (const change of this.rga.apply(op)) changes.push(change);
+            pending.rga.markCollected(pending.collected);
           } catch (error) {
-            if (!(error instanceof ConflictError || error instanceof RangeError)) throw error;
-            this.#fail(`this replica refuses the snapshot: ${error.message}`);
-            if (changes.length > 0) this.#events.onChanges?.(changes);
+            if (!(error instanceof RangeError)) throw error;
+            this.#fail(`the snapshot's collected ids: ${error.message}`);
             return;
           }
         }
-        if (changes.length > 0) this.#events.onChanges?.(changes);
+        for (const op of message.ops) {
+          try {
+            pending.rga.apply(op);
+          } catch (error) {
+            if (!(
+              error instanceof ConflictError ||
+              error instanceof RangeError ||
+              error instanceof CollectedError
+            )) {
+              throw error;
+            }
+            this.#fail(`the snapshot doesn't build a replica: ${error.message}`);
+            return;
+          }
+        }
         if (!message.last) return;
-        // The snapshot holds everything the server had logged by `seq`. Outbox operations it holds were logged, and
-        // their echoes were in the entries a snapshot replaces, so they would never come: they're acknowledged. A
-        // delete it holds the effect of needs no echo either (another client's identical delete counts already).
         this.#snapshot = null;
-        this.#seq = message.seq;
-        const ranges = merged(snapshot.tombstones);
-        this.#outbox = this.#outbox.filter(({ op }) =>
-          op.type === 'insert'
-            ? !snapshot.inserts.has(idKey(op.id))
-            : !op.spans.every((span) =>
-                covers(ranges.get(span.replica), span.counter, span.length),
-              ),
-        );
-        if (this.#seq >= this.#target) this.#goLive();
-        if (this.#remote.size > 0) this.#events.onPresence?.();
-        this.#events.onProgress?.();
+        this.#rebuild(pending.rga, message.seq);
+        return;
+      }
+      case 'collected': {
+        if (this.#held !== null) {
+          this.#held.push(message);
+          return;
+        }
+        // Only before a snapshot's parts.
+        if (this.#target === null || this.#live || this.#snapshot?.rga != null) {
+          this.#fail('collected ids outside the start of a snapshot');
+          return;
+        }
+        const pending = (this.#snapshot ??= { rga: null, collected: [] });
+        for (const span of message.spans) pending.collected.push(span);
         return;
       }
       case 'presence': {
@@ -413,6 +434,12 @@ export class SyncClient {
         return;
       }
       case 'error': {
+        if (message.code === 'resync') {
+          // Closing follows; the next connection asks for a snapshot and sends our edits again against it.
+          this.#resync = true;
+          this.#detail = message.message;
+          return;
+        }
         if (message.code === 'server-error') {
           // Closing follows; retrying may work.
           this.#detail = message.message;
@@ -422,6 +449,103 @@ export class SyncClient {
         return;
       }
     }
+  }
+
+  /**
+   * Replaces the replica with `fresh`, built from a snapshot of the server's document after entry `seq` (DESIGN.md
+   * "Persistence (day 4)", "Tombstones"), and goes over the outbox against it, in order. The snapshot holds what the
+   * server had logged by `seq`, its collected ids included, so: an insert whose ids it holds or collected was logged
+   * (its echo was in the entries the snapshot replaces) and leaves the outbox; a delete all of whose ids are its
+   * tombstones or collected has its effect there already and leaves too. The rest were never logged: applied to the
+   * new replica and kept, a delete without the collected ids it named (they're deleted), and an insert whose origin
+   * was collected re-anchored after the nearest element before it, in the old replica's sequence, that the new one
+   * holds with a smaller id (so the operation stays valid under its own id, which no one has seen). Its text
+   * survives; its place next to deleted text may move. The editor gets the difference between the two texts.
+   */
+  #rebuild(fresh: Rga, seq: number): void {
+    const old = this.#rga;
+    let order: Map<string, number> | null = null;
+    let sequence: Id[] = [];
+    const outbox: Outgoing[] = [];
+    for (const { op, text } of this.#outbox) {
+      let next: Op = op;
+      if (op.type === 'insert') {
+        if (fresh.has(op.id) || fresh.isCollected(op.id)) continue;
+        if (op.origin !== null && !fresh.has(op.origin)) {
+          if (!fresh.isCollected(op.origin)) {
+            this.#fail(`the snapshot lacks ${formatId(op.origin)}, which an unsent edit is after`);
+            return;
+          }
+          if (order === null) {
+            sequence = old.sequence();
+            order = new Map(sequence.map((id, i) => [idKey(id), i]));
+          }
+          let origin: Id | null = null;
+          for (let i = (order.get(idKey(op.origin)) ?? 0) - 1; i >= 0; i--) {
+            const id = sequence[i] as Id;
+            if (id.counter < op.id.counter && fresh.has(id)) {
+              origin = id;
+              break;
+            }
+          }
+          next = { ...op, origin };
+        }
+      } else {
+        let done = true;
+        const kept: { replica: string; counter: number; length: number }[] = [];
+        for (const span of op.spans) {
+          for (let i = 0; i < span.length; i++) {
+            const id = { replica: span.replica, counter: span.counter + i };
+            if (fresh.isCollected(id)) continue;
+            if (!fresh.isTombstone(id)) done = false;
+            const last = kept.at(-1);
+            if (last?.replica === id.replica && last.counter + last.length === id.counter)
+              last.length++;
+            else kept.push({ ...id, length: 1 });
+          }
+        }
+        if (done) continue;
+        if (kept.length > MAX_SPANS) {
+          this.#fail('an unsent delete split into more spans than one delete may carry');
+          return;
+        }
+        next = { type: 'delete', spans: kept };
+      }
+      try {
+        fresh.apply(next);
+      } catch (error) {
+        if (!(
+          error instanceof ConflictError ||
+          error instanceof RangeError ||
+          error instanceof CollectedError
+        )) {
+          throw error;
+        }
+        this.#fail(`an unsent edit doesn't apply to the snapshot: ${error.message}`);
+        return;
+      }
+      outbox.push(next === op ? { op, text } : { op: next, text: encodeOp(next) });
+    }
+    const before = old.text();
+    this.#rga = fresh;
+    this.#outbox = outbox;
+    this.#seq = seq;
+    this.#resync = false;
+    const edit = diffText(before, fresh.text());
+    if (edit !== null) {
+      const changes: Change[] = [];
+      if (edit.deleteCount > 0)
+        changes.push({ type: 'delete', index: edit.index, count: edit.deleteCount });
+      if (edit.text !== '') changes.push({ type: 'insert', index: edit.index, text: edit.text });
+      this.#events.onChanges?.(changes);
+    }
+    if (this.#seq >= (this.#target as number)) this.#goLive();
+    if (this.#remote.size > 0) this.#events.onPresence?.();
+    this.#events.onProgress?.();
+  }
+
+  #rgaOptions(clock: number): { clock: number; capacity?: number } {
+    return this.#capacity === undefined ? { clock } : { clock, capacity: this.#capacity };
   }
 
   /**
@@ -517,34 +641,3 @@ export function randomReplica(): string {
 export type { Change, Cursor, Id };
 
 const idKey = (id: { replica: string; counter: number }) => `${id.counter}@${id.replica}`;
-
-/** Each replica's ranges sorted and merged where they touch or overlap. */
-function merged(tombstones: Map<string, [number, number][]>): Map<string, [number, number][]> {
-  const out = new Map<string, [number, number][]>();
-  for (const [replica, ranges] of tombstones) {
-    ranges.sort((a, b) => a[0] - b[0]);
-    const list: [number, number][] = [];
-    for (const [start, end] of ranges) {
-      const last = list.at(-1);
-      if (last !== undefined && start <= last[1] + 1) last[1] = Math.max(last[1], end);
-      else list.push([start, end]);
-    }
-    out.set(replica, list);
-  }
-  return out;
-}
-
-/** Whether merged `ranges` hold every counter from `counter` to `counter + length - 1`. */
-function covers(ranges: [number, number][] | undefined, counter: number, length: number): boolean {
-  if (ranges === undefined) return false;
-  let lo = 0;
-  let hi = ranges.length - 1;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    const [start, end] = ranges[mid] as [number, number];
-    if (counter < start) hi = mid - 1;
-    else if (counter > end) lo = mid + 1;
-    else return counter + length - 1 <= end;
-  }
-  return false;
-}

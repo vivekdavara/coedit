@@ -220,6 +220,7 @@ export class Rga {
     waitingRuns: number;
     deletedAhead: number;
     waitingDeletes: number;
+    collected: number;
   } {
     return {
       elements: this.#known.size,
@@ -227,6 +228,7 @@ export class Rga {
       waitingRuns: this.#waitingRuns,
       deletedAhead: this.#deletedAhead.size,
       waitingDeletes: this.#waitingDeletes.size,
+      collected: this.#collected.size,
     };
   }
 
@@ -797,6 +799,26 @@ export class Rga {
         this.#clock = Math.max(this.#clock, span.counter + span.length - 1);
       }
     }
+  }
+
+  /** Whether `id` is a placed element that's deleted (a tombstone here). */
+  isTombstone(id: Id): boolean {
+    const e = this.#known.get(id);
+    return e !== undefined && e.run.placed && e.deleted;
+  }
+
+  /** Whether `id` was collected here. */
+  isCollected(id: Id): boolean {
+    return this.#collected.has(id);
+  }
+
+  /** Every placed element's id in sequence order, tombstones included (for a client re-anchoring its edits). */
+  sequence(): Id[] {
+    const ids: Id[] = [];
+    for (const block of this.#blocks) {
+      for (const e of block.elements) ids.push({ replica: e.id.replica, counter: e.id.counter });
+    }
+    return ids;
   }
 
   /** Whether `op` names a collected id: an insert's own ids or origin, any id a delete names. */

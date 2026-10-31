@@ -3,6 +3,9 @@
 // online and the outboxes are empty, every client's replica must be the server's, state and all, and the text each
 // client patched from the reported changes must be its replica's (what the editor shows).
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { after, before, test } from 'node:test';
 import fc from 'fast-check';
 import { startServer, type SyncServer } from '@coedit/server';
@@ -48,14 +51,22 @@ const schedule = fc
   );
 
 let server: SyncServer;
+let stored: SyncServer;
 let docs = 0;
+const data = fs.mkdtempSync(path.join(os.tmpdir(), 'coedit-convergence-'));
 before(async () => {
   server = await startServer({ port: 0 });
+  // Day 4: a snapshot every 3 entries, collection on, so clients rebuild from snapshots all the time.
+  stored = await startServer({ port: 0, dataDir: data, fsync: false, snapshotEvery: 3 });
 });
-after(() => server.close());
+after(async () => {
+  await server.close();
+  await stored.close();
+  fs.rmSync(data, { recursive: true, force: true });
+});
 
 /** A client that keeps the text an editor would show: patched by its own edits and the reported changes. */
-function makeClient(doc: string) {
+function makeClient(doc: string, server: SyncServer) {
   let shown = '';
   const client = new SyncClient(
     { url: `ws://${server.host}:${server.port}/sync`, doc, backoffMs: { initial: 2, max: 20 } },
@@ -91,7 +102,7 @@ test('clients on the real server converge with it under generated schedules', as
   await fc.assert(
     fc.asyncProperty(schedule, async ([count, steps]) => {
       const doc = `conv-${++docs}`;
-      const clients = Array.from({ length: count }, () => makeClient(doc));
+      const clients = Array.from({ length: count }, () => makeClient(doc, server));
       for (const c of clients) c.client.start();
       try {
         for (const s of steps) {
@@ -137,4 +148,62 @@ test('clients on the real server converge with it under generated schedules', as
   console.log(`# ${edits} edits, ${drops} dropped connections`);
   // Five runs here: 1,012 to 1,134 edits and 153 to 179 drops; the bound is well under that, for other seeds.
   assert.ok(edits > 700 && drops > 100, `${edits} edits, ${drops} dropped connections`);
+});
+
+test('and on a stored server that snapshots every 3 entries and collects tombstones (day 4)', async () => {
+  let edits = 0;
+  let collected = 0;
+  let rebuilt = 0;
+  await fc.assert(
+    fc.asyncProperty(schedule, async ([count, steps]) => {
+      const doc = `stored-${++docs}`;
+      const clients = Array.from({ length: count }, () => makeClient(doc, stored));
+      for (const c of clients) c.client.start();
+      try {
+        for (const s of steps) {
+          if (s.kind === 'pause') {
+            await new Promise((resolve) => setTimeout(resolve, s.ms));
+            continue;
+          }
+          const c = clients[s.who] as (typeof clients)[number];
+          if (s.kind === 'edit') {
+            c.edit(s.at, s.remove, s.text);
+            edits++;
+          } else if (s.kind === 'disconnect') c.client.disconnect();
+          else if (s.kind === 'offline') c.client.stop();
+          else c.client.start();
+        }
+        for (const c of clients) c.client.start();
+        await eventually(() => {
+          const seq = stored.inspect(doc)?.seq ?? 0;
+          return clients.every(
+            (c) =>
+              c.client.status === 'online' && c.client.unacknowledged === 0 && c.client.seq === seq,
+          );
+        }, 20_000);
+        const expected = stored.inspect(doc);
+        assert.ok(expected !== undefined);
+        if (expected.state.includes('| collected')) collected++;
+        // A client that kept its replica holds tombstones the server collected; one that rebuilt holds what the
+        // server holds. Either way the text, and every position's element, are the same.
+        for (const c of clients) {
+          assert.equal(c.client.rga.text(), expected.text);
+          assert.equal(c.shown(), expected.text);
+          assert.equal(c.client.rga.pending, 0);
+          if (c.client.rga.state() === expected.state) rebuilt++;
+          const first = (clients[0] as (typeof clients)[number]).client.rga;
+          for (let i = 0; i <= c.client.rga.length; i++) {
+            assert.deepEqual(c.client.rga.idBefore(i), first.idBefore(i));
+          }
+        }
+      } finally {
+        for (const c of clients) c.client.stop();
+      }
+    }),
+    { numRuns: 60 },
+  );
+  console.log(
+    `# stored: ${edits} edits; ${collected} of 60 documents collected something; ${rebuilt} clients ended rebuilt`,
+  );
+  assert.ok(collected > 5, `only ${collected} documents collected anything`);
 });

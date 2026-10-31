@@ -60,7 +60,7 @@ export interface HubOptions {
   readonly store?: StoreOptions & { readonly root: string };
   /** With a store: write a snapshot once this many entries have been logged since the last one (default 10,000). */
   readonly snapshotEvery?: number;
-  /** With a store: collect leaf tombstones at each snapshot (DESIGN.md "Tombstones"; default off until clients rebuild). */
+  /** With a store: collect leaf tombstones at each snapshot (DESIGN.md "Tombstones"; default on). */
   readonly collect?: boolean;
 }
 
@@ -118,7 +118,7 @@ export class DocumentHub {
       options.capacity === undefined ? {} : { capacity: options.capacity },
     );
     this.#snapshotEvery = options.snapshotEvery ?? 10_000;
-    this.#collect = options.collect ?? false;
+    this.#collect = options.collect ?? true;
     if (options.store === undefined) return;
     const { store, loaded } = DocumentStore.open(options.store.root, doc, options.store);
     try {
@@ -240,9 +240,10 @@ export class DocumentHub {
         seq: this.seq,
       }),
     );
-    // Too far behind for the log kept: the document as it is now, then the log from here on.
+    // Too far behind for the log kept, or asking for everything (`have` 0: a fresh client, or one resyncing) where
+    // elements have been collected: the document as it is now, then the log from here on.
     const state: MemberState =
-      have < this.#base
+      have < this.#base || (have === 0 && this.#rga.sizes().collected > 0)
         ? {
             cursor: null,
             next: this.seq + 1,

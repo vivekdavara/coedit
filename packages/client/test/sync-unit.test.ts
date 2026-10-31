@@ -588,7 +588,7 @@ describe('a snapshot', () => {
     spans: [{ replica, counter, length }],
   });
 
-  test('merges into the replica, reports the changes, and puts the client at its sequence number', () => {
+  test('replaces the replica, reports the difference, and puts the client at its sequence number', () => {
     const changes: unknown[][] = [];
     const { client, latest } = setup({ changes });
     client.start();
@@ -599,12 +599,8 @@ describe('a snapshot', () => {
     assert.equal(client.rga.text(), 'ac');
     assert.equal(client.seq, 7);
     assert.equal(client.status, 'online');
-    assert.deepEqual(changes, [
-      [
-        { type: 'insert', index: 0, text: 'abc' },
-        { type: 'delete', index: 1, count: 1 },
-      ],
-    ]);
+    // The replica is rebuilt from the snapshot: the editor gets the difference between the texts.
+    assert.deepEqual(changes, [[{ type: 'insert', index: 0, text: 'ac' }]]);
     latest().receive({ type: 'ops', from: 8, ops: [insert(4, 'x', [3, 'x'], 'd')] });
     assert.equal(client.rga.text(), 'acd');
   });
@@ -618,7 +614,7 @@ describe('a snapshot', () => {
     latest().receive(snapshot(3, [insert(1, 'x', null, 'ab')], false));
     assert.equal(client.seq, 0);
     assert.equal(client.status, 'syncing');
-    assert.equal(client.rga.text(), 'ab');
+    assert.equal(client.rga.text(), '', 'the new replica is built aside until the last part');
     latest().receive(snapshot(3, [], true));
     assert.equal(client.seq, 3);
     assert.equal(client.status, 'online');
@@ -750,5 +746,164 @@ describe('a snapshot', () => {
     client.release();
     assert.equal(client.rga.text(), 'ab');
     assert.equal(client.status, 'online');
+  });
+});
+
+describe('collected ids (day 4, DESIGN.md "Tombstones")', () => {
+  const snapshot = (seq: number, ops: Op[], last = true): ServerMessage => ({
+    type: 'snapshot',
+    seq,
+    ops,
+    last,
+  });
+  const collected = (...spans: [string, number, number][]): ServerMessage => ({
+    type: 'collected',
+    spans: spans.map(([replica, counter, length]) => ({ replica, counter, length })),
+  });
+  const del = (counter: number, replica: string, length: number): Op => ({
+    type: 'delete',
+    spans: [{ replica, counter, length }],
+  });
+
+  /** A client that applied "abc" by x (entry 1), then went offline. */
+  function offline() {
+    const { client, latest } = setup();
+    client.start();
+    latest().open();
+    latest().take();
+    latest().receive(welcome(1));
+    latest().receive({ type: 'ops', from: 1, ops: [insert(1, 'x', null, 'abc')] });
+    client.stop();
+    return { client, latest };
+  }
+
+  test('acknowledge an outbox insert or delete the server logged and has since collected', () => {
+    const { client, latest } = offline();
+    client.edit(3, 0, 'd'); // 4@me after c: logged, then deleted and collected
+    client.edit(2, 1, ''); // deletes c: logged, then collected
+    client.start();
+    latest().open();
+    latest().take();
+    latest().receive(welcome(9));
+    latest().receive(collected(['me', 4, 1], ['x', 3, 1]));
+    latest().receive(snapshot(9, [{ ...insert(1, 'x', null, 'abc'), text: 'ab' }]));
+    assert.equal(client.unacknowledged, 0);
+    assert.equal(client.rga.text(), 'ab');
+    assert.equal(client.status, 'online');
+    assert.deepEqual(latest().take(), []);
+  });
+
+  test('re-anchor an unsent insert whose origin was collected, after an element with a smaller id', () => {
+    const { client, latest } = offline();
+    client.edit(3, 0, 'Z'); // 4@me after 3@x: unsent; meanwhile someone backspaced c (3@x), which was collected
+    client.start();
+    latest().open();
+    latest().take();
+    latest().receive(welcome(5));
+    latest().receive(collected(['x', 3, 1]));
+    // The server's document: "ab" and then "Q" typed by y after b (5@y: a larger id than 4@me).
+    latest().receive(
+      snapshot(5, [{ ...insert(1, 'x', null, 'abc'), text: 'ab' }, insert(5, 'y', [2, 'x'], 'Q')]),
+    );
+    const sent = latest()
+      .take()
+      .flatMap((m) => (m.type === 'ops' ? m.ops : []));
+    // After b (2@x), the nearest element before c with an id smaller than 4@me.
+    assert.deepEqual(sent, [insert(4, 'me', [2, 'x'], 'Z')]);
+    assert.equal(client.rga.text(), 'abQZ');
+    assert.equal(client.unacknowledged, 1);
+  });
+
+  test('drop the collected ids from an unsent delete, and keep the rest of it', () => {
+    const { client, latest } = offline();
+    client.edit(1, 2, ''); // deletes b and c
+    client.start();
+    latest().open();
+    latest().take();
+    latest().receive(welcome(4));
+    latest().receive(collected(['x', 3, 1])); // c deleted and collected; b still there
+    latest().receive(snapshot(4, [{ ...insert(1, 'x', null, 'abc'), text: 'ab' }]));
+    const sent = latest()
+      .take()
+      .flatMap((m) => (m.type === 'ops' ? m.ops : []));
+    assert.deepEqual(sent, [del(2, 'x', 1)]);
+    assert.equal(client.rga.text(), 'a');
+  });
+
+  test('resync: the next hello asks for everything, and the client waits for the snapshot', async () => {
+    const statuses: [Status, string][] = [];
+    const { client, latest, sockets } = setup({ statuses });
+    client.start();
+    latest().open();
+    latest().take();
+    latest().receive(welcome(1));
+    latest().receive({ type: 'ops', from: 1, ops: [insert(1, 'x', null, 'abc')] });
+    client.edit(3, 0, '!');
+    latest().take();
+    latest().receive({
+      type: 'error',
+      code: 'resync',
+      message: 'ops[0] refused: it names an element this document has collected',
+    });
+    latest().drop(1008);
+    await nextTick();
+    assert.equal(sockets.length, 2);
+    latest().open();
+    assert.deepEqual(latest().take(), [
+      { type: 'hello', protocol: 1, doc: 'd', replica: 'me', have: 0 },
+    ]);
+    // Nothing new since entry 1, but a snapshot follows: not online yet.
+    latest().receive(welcome(1));
+    assert.equal(client.status, 'syncing');
+    latest().receive(collected(['x', 3, 1]));
+    latest().receive(snapshot(1, [{ ...insert(1, 'x', null, 'abc'), text: 'ab' }]));
+    assert.equal(client.status, 'online');
+    assert.equal(client.rga.text(), 'ab!');
+    const sent = latest()
+      .take()
+      .flatMap((m) => (m.type === 'ops' ? m.ops : []));
+    assert.deepEqual(sent, [insert(4, 'me', [2, 'x'], '!')]);
+    // And the hello after that asks from where it is again.
+    latest().drop();
+    await nextTick();
+    latest().open();
+    assert.deepEqual(latest().take()[0], {
+      type: 'hello',
+      protocol: 1,
+      doc: 'd',
+      replica: 'me',
+      have: 1,
+    });
+  });
+
+  test('collected ids while live, or after a snapshot part, are a server bug: the client stops', () => {
+    for (const steps of [
+      [welcome(0), collected(['x', 1, 1])],
+      [welcome(2), snapshot(2, [insert(1, 'x', null, 'ab')], false), collected(['x', 3, 1])],
+    ]) {
+      const { client, latest } = setup();
+      client.start();
+      latest().open();
+      latest().take();
+      for (const step of steps) latest().receive(step);
+      assert.equal(client.status, 'failed');
+      assert.match(client.detail, /collected ids outside/);
+    }
+  });
+
+  test("the new replica's clock starts at the old one's, so its next ids stay new", () => {
+    const { client, latest } = offline();
+    client.edit(3, 0, 'yz'); // 4-5@me, logged and collected since
+    client.start();
+    latest().open();
+    latest().take();
+    latest().receive(welcome(3));
+    latest().receive(collected(['me', 4, 2]));
+    latest().receive(snapshot(3, [insert(1, 'x', null, 'abc')]));
+    client.edit(3, 0, 'w');
+    const sent = latest()
+      .take()
+      .flatMap((m) => (m.type === 'ops' ? m.ops : []));
+    assert.deepEqual(sent, [insert(6, 'me', [3, 'x'], 'w')]);
   });
 });

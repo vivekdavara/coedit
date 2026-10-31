@@ -288,4 +288,59 @@ describe('clients and the server', () => {
       await s.close();
     }
   });
+
+  test('a client offline across a tombstone collection comes back through a snapshot, its edit kept', async (t) => {
+    const data = fs.mkdtempSync(path.join(os.tmpdir(), 'coedit-client-'));
+    t.after(() => {
+      fs.rmSync(data, { recursive: true, force: true });
+    });
+    const s = await startServer({ port: 0, dataDir: data, fsync: false, snapshotEvery: 5 });
+    try {
+      const doc = 'gc';
+      const a = client(s, doc);
+      const b = client(s, doc);
+      t.after(() => {
+        a.c.stop();
+        b.c.stop();
+      });
+      a.c.start();
+      b.c.start();
+      await eventually(() => a.c.status === 'online' && b.c.status === 'online');
+      for (const ch of 'abc') {
+        a.edit(a.c.rga.length, 0, ch);
+        await eventually(() => a.c.unacknowledged === 0);
+      }
+      await eventually(() => b.c.rga.text() === 'abc');
+      b.c.stop();
+      b.edit(3, 0, 'Z'); // after the "c", offline
+      a.edit(2, 1, ''); // a backspaces the "c": a leaf (nothing on the server was typed after it)
+      for (let i = 0; i < 30; i++) {
+        a.edit(a.c.rga.length, 0, String(i % 10));
+        await eventually(() => a.c.unacknowledged === 0);
+      }
+      assert.match(s.inspect(doc)?.state ?? '', /collected 3\+1@/, 'the "c" was collected');
+      b.c.start();
+      const seq = () => s.inspect(doc)?.seq;
+      await eventually(
+        () =>
+          [a.c, b.c].every((c) => c.status === 'online' && c.unacknowledged === 0) &&
+          a.c.seq === seq() &&
+          b.c.seq === seq(),
+      );
+      const text = s.inspect(doc)?.text ?? '';
+      assert.equal(a.c.rga.text(), text);
+      assert.equal(b.c.rga.text(), text);
+      assert.equal(b.shown(), text, "b's textarea was patched to the rebuilt text");
+      assert.equal(
+        text.replace('Z', ''),
+        `ab${Array.from({ length: 30 }, (_, i) => i % 10).join('')}`,
+      );
+      assert.ok(text.includes('Z'), 'the offline edit survived');
+      // b rebuilt from the snapshot: its state is the server's, collected ids included. a still holds the tombstone.
+      assert.equal(b.c.rga.state(), s.inspect(doc)?.state);
+      assert.ok(a.c.rga.isTombstone({ replica: a.c.replica, counter: 3 }));
+    } finally {
+      await s.close();
+    }
+  });
 });
