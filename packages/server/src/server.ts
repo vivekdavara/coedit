@@ -43,6 +43,8 @@ export interface SyncServer {
   readonly port: number;
   /** Open sync connections. */
   readonly connections: number;
+  /** A document's log length, text and replica state (Rga.state), or undefined if no one has joined it. */
+  inspect(doc: string): { seq: number; text: string; state: string } | undefined;
   /** Stops listening and closes every connection; resolves once the server is closed. */
   close(): Promise<void>;
 }
@@ -76,6 +78,9 @@ export async function startServer(options: ServerOptions = {}): Promise<SyncServ
     port: address.port,
     get connections() {
       return sync.connections;
+    },
+    inspect(doc) {
+      return sync.inspect(doc);
     },
     close() {
       closing ??= new Promise<void>((resolve, reject) => {
@@ -127,6 +132,11 @@ class Sync {
 
   get connections(): number {
     return this.#wss.clients.size;
+  }
+
+  inspect(doc: string): { seq: number; text: string; state: string } | undefined {
+    const hub = this.#hubs.get(doc);
+    return hub === undefined ? undefined : { seq: hub.seq, text: hub.text(), state: hub.state() };
   }
 
   close(): void {
