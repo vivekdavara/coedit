@@ -291,6 +291,35 @@ describe('a client that stops reading', () => {
   });
 });
 
+describe('the heartbeat', () => {
+  test('drops a connection that stops answering pings, and keeps one that answers', async () => {
+    const server = await startServer({ port: 0, heartbeatMs: 40 });
+    try {
+      const doc = freshDoc();
+      const [alive] = await TestClient.join(server, doc, 'alive');
+      // A client that never answers a ping, as a machine that went to sleep doesn't.
+      const silent = new WebSocket(`ws://${server.host}:${server.port}/sync`, { autoPong: false });
+      await new Promise((resolve) => silent.once('open', resolve));
+      silent.send(JSON.stringify({ type: 'hello', protocol: 1, doc, replica: 'silent', have: 0 }));
+      const closed = new Promise<number>((resolve) => silent.once('close', resolve));
+      // Dropped at the second ping after it joined at the latest: within about 3 intervals.
+      const outcome = await Promise.race([
+        closed,
+        new Promise((resolve) => setTimeout(resolve, 5_000, 'still open after 5 s')),
+      ]);
+      assert.equal(outcome, 1006);
+      assert.deepEqual(await alive.next(), { type: 'presence', replica: 'silent', cursor: null });
+      // The client that answers is still here after several more intervals.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(server.connections, 1);
+      assert.equal(alive.ws.readyState, WebSocket.OPEN);
+      alive.close();
+    } finally {
+      await server.close();
+    }
+  });
+});
+
 describe('close', () => {
   test('ends every sync connection', async () => {
     const server = await startServer({ port: 0 });

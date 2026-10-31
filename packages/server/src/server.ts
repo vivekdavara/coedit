@@ -33,6 +33,12 @@ export interface ServerOptions {
    * connection rather than hold more; the client reconnects and catches up from the log.
    */
   maxBufferedBytes?: number;
+  /**
+   * How often the server pings each connection (default 30 s). One that hasn't answered the previous ping by the
+   * next is dropped: a laptop whose lid closed, or a network that went away, sends no close, and until TCP gives up
+   * (which can take hours) its cursor would stay on everyone's screen.
+   */
+  heartbeatMs?: number;
   /** Each document replica's capacity (Rga's; default its maximum). Tests set it small. */
   capacity?: number;
 }
@@ -105,6 +111,9 @@ class Sync {
   readonly #helloTimeoutMs: number;
   readonly #maxBufferedBytes: number;
   readonly #capacity: number | undefined;
+  /** Connections that answered the last ping (or are newer than it). */
+  readonly #alive = new WeakSet<WebSocket>();
+  readonly #heartbeat: ReturnType<typeof setInterval>;
 
   constructor(options: ServerOptions) {
     // ws closes a connection that sends a message over maxPayload with code 1009 (message too big), before
@@ -114,6 +123,18 @@ class Sync {
     this.#helloTimeoutMs = options.helloTimeoutMs ?? 10_000;
     this.#maxBufferedBytes = options.maxBufferedBytes ?? 16 * MAX_MESSAGE_BYTES;
     this.#capacity = options.capacity;
+    this.#heartbeat = setInterval(() => {
+      for (const ws of this.#wss.clients) {
+        if (!this.#alive.has(ws)) {
+          ws.terminate();
+          continue;
+        }
+        this.#alive.delete(ws);
+        ws.ping();
+      }
+    }, options.heartbeatMs ?? 30_000);
+    // The heartbeat alone mustn't keep the process running.
+    this.#heartbeat.unref();
   }
 
   upgrade(request: IncomingMessage, socket: Socket, head: Buffer): void {
@@ -140,6 +161,7 @@ class Sync {
   }
 
   close(): void {
+    clearInterval(this.#heartbeat);
     for (const ws of this.#wss.clients) ws.terminate();
     this.#wss.close();
   }
@@ -170,6 +192,10 @@ class Sync {
     const helloTimer = setTimeout(() => {
       fail('unexpected-message', `no hello within ${this.#helloTimeoutMs} ms`);
     }, this.#helloTimeoutMs);
+    this.#alive.add(ws);
+    ws.on('pong', () => {
+      this.#alive.add(ws);
+    });
     // An 'error' event is followed by 'close'; without a listener it would be thrown.
     ws.on('error', () => {});
     ws.on('close', () => {
