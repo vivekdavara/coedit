@@ -154,6 +154,87 @@ export function validateOp(value: unknown, path = 'op'): Op {
   return op(value as JsonValue, path);
 }
 
+/** The most UTF-8 bytes in one WebSocket message, either way (the server refuses more). */
+export const MAX_MESSAGE_BYTES = 1 << 20;
+
+/**
+ * Room left in a message for everything but its operations: `{"type":"ops","from":<16 digits>,"ops":[` and `]}`
+ * take 48 bytes.
+ */
+const OPS_ENVELOPE_BYTES = 64;
+
+/**
+ * One operation's canonical text, as the encoders write it inside a message. The sync client and the server keep
+ * operations in this form: the client compares its outbox against echoes by it, and the server writes messages
+ * from it without encoding each operation again for every message.
+ */
+export function encodeOp(value: Op): string {
+  return JSON.stringify(validateOp(value));
+}
+
+/**
+ * The client's `ops` message from operations already written by encodeOp; the same text encodeClientMessage
+ * writes for them. The operations aren't checked again.
+ */
+export function encodeClientOps(texts: readonly string[]): string {
+  checkBatch(texts);
+  return `{"type":"ops","ops":[${texts.join(',')}]}`;
+}
+
+/** The server's `ops` message, numbered from `from`, from operations already written by encodeOp. */
+export function encodeServerOps(from: number, texts: readonly string[]): string {
+  checkBatch(texts);
+  integer(from, 'from', 1, Number.MAX_SAFE_INTEGER - texts.length + 1);
+  return `{"type":"ops","from":${from},"ops":[${texts.join(',')}]}`;
+}
+
+function checkBatch(texts: readonly string[]): void {
+  if (texts.length === 0 || texts.length > MAX_OPS) {
+    throw new ProtocolError('ops', `must be 1 to ${MAX_OPS} operations, not ${texts.length}`);
+  }
+}
+
+/**
+ * Splits operations written by encodeOp into batches that each fit one `ops` message: at most MAX_OPS operations
+ * and MAX_MESSAGE_BYTES in all. An operation is at most about 90 KB (a delete of 1,000 spans), so each fits.
+ */
+export function batchOps(texts: readonly string[]): string[][] {
+  const limit = MAX_MESSAGE_BYTES - OPS_ENVELOPE_BYTES;
+  const batches: string[][] = [];
+  let batch: string[] = [];
+  let bytes = 0;
+  for (const text of texts) {
+    const size = utf8Length(text) + 1; // and a comma
+    if (batch.length === MAX_OPS || (batch.length > 0 && bytes + size > limit)) {
+      batches.push(batch);
+      batch = [];
+      bytes = 0;
+    }
+    batch.push(text);
+    bytes += size;
+  }
+  if (batch.length > 0) batches.push(batch);
+  return batches;
+}
+
+/** The number of bytes `value` takes in UTF-8. A lone surrogate counts 3, as TextEncoder writes U+FFFD for it. */
+export function utf8Length(value: string): number {
+  let bytes = 0;
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i);
+    if (c < 0x80) bytes += 1;
+    else if (c < 0x800) bytes += 2;
+    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < value.length) {
+      const next = value.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        i++;
+      } else bytes += 3;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+
 function read(text: string): JsonValue {
   try {
     return parseJson(text);

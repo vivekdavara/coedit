@@ -253,6 +253,36 @@ export class Rga {
     return op.type === 'insert' ? this.#insert(op) : this.#delete(op);
   }
 
+  /** Whether this replica holds the element `id`, placed or waiting for its origin. */
+  has(id: Id): boolean {
+    return this.#known.has(id);
+  }
+
+  /**
+   * Whether `op`'s dependencies are all placed here, so that applying it leaves nothing waiting: an insert's origin
+   * (or HEAD), every id a delete names. The server accepts only such operations, so it never holds a waiting one
+   * (DESIGN.md "The sync protocol"). A delete's spans are checked run by run, not id by id: a span over a few long
+   * runs costs a few lookups, however many ids it names. Throws ProtocolError for an operation that isn't valid.
+   */
+  ready(op: Op): boolean {
+    const checked = validateOp(op);
+    if (checked.type === 'insert') {
+      return checked.origin === null || this.#known.get(checked.origin)?.run.placed === true;
+    }
+    for (const span of checked.spans) {
+      // validateOp checked that the span's last counter is a safe integer.
+      const last = span.counter + span.length - 1;
+      let counter = span.counter;
+      while (counter <= last) {
+        const e = this.#known.get({ replica: span.replica, counter });
+        if (e?.run.placed !== true) return false;
+        // Every id from here to the end of e's run is placed with it.
+        counter = e.run.op.id.counter + e.run.elements.length;
+      }
+    }
+    return true;
+  }
+
   #insert(op: InsertOp): Change[] {
     const chars = Array.from(op.text);
     // A run is created whole by one replica, which never reuses a counter, so a run that arrives again is known
