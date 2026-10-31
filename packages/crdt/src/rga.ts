@@ -635,29 +635,31 @@ export class Rga {
   }
 
   /**
-   * Operations that rebuild this replica's state (DESIGN.md "Persistence"): every run's insert as it arrived, in the
-   * order of the run's first element in the sequence, then deletes of the tombstones. Every element comes after its
-   * origin in the sequence, so each insert's origin is placed by an earlier one, and applying the inserts in any
-   * order whose origins come first gives the same sequence (that's the CRDT's convergence). Applied to a new replica
-   * they give this replica's `state()`; applied to one holding some of the operations this replica has applied,
-   * they bring it to everything this replica has. The inserts are the original runs, not the stretches the
-   * sequence now shows, since a run's middle sent as a run of its own would be a conflict. Throws for a replica
+   * Operations that rebuild this replica's state (DESIGN.md "Persistence (day 4)"): every run's insert as it arrived,
+   * in id order (counter, then replica), then deletes of the tombstones in sequence order. An insert's counter is
+   * larger than its origin's, so each origin comes first, and applying the inserts in any order whose origins come
+   * first gives the same sequence (that's the CRDT's convergence). Applied to a new replica they give this replica's
+   * `state()`; applied to one holding some of the operations this replica has applied, they bring it to everything
+   * this replica has. Id order also makes them cheap to apply: no larger id is placed yet, so each insert's scan stops
+   * just after its origin. (The first version wrote them in sequence order, which is valid too, but a tombstone typed
+   * early sits after everything typed after it, and placing it scanned past all of that: loading a snapshot of
+   * 100,000 entries took 2,350 ms against 467 ms for the log.) The inserts are the original runs, not the stretches
+   * the sequence now shows, since a run's middle sent as a run of its own would be a conflict. Throws for a replica
    * holding waiting operations, which have no place to be written at (the server never holds any).
    */
   snapshot(): Op[] {
     if (this.pending > 0) throw new Error(`${this.pending} operations are waiting: no snapshot`);
-    const ops: Op[] = [];
     const runs = new Set<Run>();
     const tombstones: Element[] = [];
     for (const block of this.#blocks) {
       for (const e of block.elements) {
-        if (!runs.has(e.run)) {
-          runs.add(e.run);
-          ops.push(validateOp(e.run.op));
-        }
+        runs.add(e.run);
         if (e.deleted) tombstones.push(e);
       }
     }
+    const ops: Op[] = [...runs]
+      .sort((a, b) => compareIds(a.op.id, b.op.id))
+      .map((run) => validateOp(run.op));
     const spans = spansOf(tombstones);
     for (let i = 0; i < spans.length; i += MAX_SPANS) {
       ops.push({ type: 'delete', spans: spans.slice(i, i + MAX_SPANS) });

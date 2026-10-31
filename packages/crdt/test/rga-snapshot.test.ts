@@ -4,7 +4,8 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import fc from 'fast-check';
-import { MAX_INSERT_LENGTH, MAX_SPANS, type Op } from '../src/protocol.ts';
+import { compareIds } from '../src/ids.ts';
+import { MAX_INSERT_LENGTH, MAX_SPANS, type InsertOp, type Op } from '../src/protocol.ts';
 import { Rga } from '../src/rga.ts';
 import { wire } from './harness/rga-subject.ts';
 import { sessions } from './harness/sessions.ts';
@@ -79,6 +80,22 @@ describe('Rga.snapshot', () => {
       { type: 'delete', spans: [{ replica: 'a', counter: 1, length: 1 }] },
     ]);
     assert.equal(replay(ops).text(), 'eXYllo');
+  });
+
+  test('writes the inserts in id order, so applying them never scans past a larger id', () => {
+    // A tombstone typed early sits after everything typed after it at the same spot: in sequence order it came
+    // last and its placement scanned past all of that (loading 100,000 entries: 2,350 ms, against 467 from the log).
+    fc.assert(
+      fc.property(sessions, (ops) => {
+        const inserts = replay(ops)
+          .snapshot()
+          .filter((op) => op.type === 'insert');
+        for (let i = 1; i < inserts.length; i++) {
+          assert.ok(compareIds((inserts[i - 1] as InsertOp).id, (inserts[i] as InsertOp).id) < 0);
+        }
+      }),
+      { numRuns: 200 },
+    );
   });
 
   test('of an empty replica is empty, and a replica holding waiting operations has none', () => {
