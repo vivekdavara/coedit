@@ -95,8 +95,16 @@ export class DocumentStore {
     options: StoreOptions = {},
   ): { store: DocumentStore; loaded: Loaded } {
     const fsync = options.fsync ?? true;
-    const dir = path.join(root, directoryName(doc));
-    fs.mkdirSync(dir, { recursive: true });
+    const dir = path.resolve(root, directoryName(doc));
+    const created = fs.mkdirSync(dir, { recursive: true });
+    if (fsync && created !== undefined) {
+      // Each directory made here is an entry in its parent, and until the parent is synced a power loss can take the
+      // new directory with every entry fsynced inside it (review of day 4).
+      for (let d = dir; ; d = path.dirname(d)) {
+        syncDirectory(path.dirname(d));
+        if (d === path.resolve(created)) break;
+      }
+    }
     const names = fs.readdirSync(dir);
     // A snapshot that was being written when the process stopped.
     for (const name of names) if (name.endsWith('.tmp')) fs.rmSync(path.join(dir, name));
