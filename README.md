@@ -17,8 +17,9 @@ React editor patching remote changes into the textarea with the caret kept in pl
 and convergence tested end to end on the real server (day 3); persistence: an op log appended (and fsynced) before
 anything is relayed, snapshots that are lists of ordinary operations, recovery that drops a torn last line and refuses
 anything else it can't read back, snapshots sent to clients too far behind the log, idle documents unloaded;
-Playwright with two browsers editing at once and offline; and measurements of the CRDT's speed, a document's growth,
-and what storage costs (day 4). Tombstone collection was designed on day 4 but not built (DESIGN.md "Tombstones").
+Playwright with two browsers editing at once and offline; measurements of the CRDT's speed, a document's growth, and
+what storage costs, and from them the element array replaced by counted blocks (about 175 times faster at 369,000
+elements) (day 4). Tombstone collection was designed on day 4 but not built (DESIGN.md "Tombstones").
 Next: release (day 5).
 
 ## Architecture
@@ -120,28 +121,30 @@ npm run storage -w @coedit/server
 Measured on the Apple M3 (macOS 26.6.2, Node 23.11.0), **on battery** (44% at 15:01, 33% at 15:31), nothing else of
 mine running unless said. The editing session is synthetic (a seeded random model of typing, not a recorded trace).
 
-- **The CRDT over a 100,000-edit session** (`npm run editing -w @coedit/crdt`, seed 1, 129.7 s in all, at `97e88cd`):
-  70,294 characters typed, 14,935 backspaces, 4,957 caret moves, 3,801 selections deleted, 1,021 pastes of 20 to 500
-  characters, 4,992 words; 95,043 operations.
+- **The CRDT over a 100,000-edit session** (`npm run editing -w @coedit/crdt`, seed 1): 70,294 characters typed,
+  14,935 backspaces, 4,957 caret moves, 3,801 selections deleted, 1,021 pastes of 20 to 500 characters, 4,992 words;
+  95,043 operations. Run first with the elements in one array scanned from the start (at `97e88cd`, 129.7 s in all),
+  then with blocks of 512 elements that count their visible ones (at `8e8f5cf`, 2.7 s in all); same seed, same
+  session (the growth numbers below came out identical):
 
-  | Tenth of the session | Local edits/s | Visible at its end | Elements at its end |
-  | -------------------: | ------------: | -----------------: | ------------------: |
-  |                    1 |        21,357 |             32,709 |              43,540 |
-  |                    3 |         5,408 |             79,872 |             113,250 |
-  |                    5 |         3,093 |            133,000 |             188,817 |
-  |                    7 |         2,051 |            183,101 |             261,989 |
-  |                   10 |         1,462 |            256,466 |             368,852 |
+  | Tenth of the session | Local edits/s, one array | Local edits/s, blocks | Visible at its end | Elements at its end |
+  | -------------------: | -----------------------: | --------------------: | -----------------: | ------------------: |
+  |                    1 |                   21,357 |               237,240 |             32,709 |              43,540 |
+  |                    3 |                    5,408 |               333,421 |             79,872 |             113,250 |
+  |                    5 |                    3,093 |               323,474 |            133,000 |             188,817 |
+  |                    7 |                    2,051 |               289,882 |            183,101 |             261,989 |
+  |                   10 |                    1,462 |               256,670 |            256,466 |             368,852 |
 
-  Every operation scans the element array from the start, so the rate falls with the document's size (tombstones
-  included): fine for one person typing, slow for large documents. A second replica applying all 95,043 operations
-  in order: 3,338 a second (28.5 s), and 3,425 a second from JSON text through the strict decoder (27.8 s): the
-  decoder isn't the cost, placement is. A 100,000-character paste into the middle: 20.5 ms locally, 24.0 ms remotely
-  (10 operations). At the end (the paste deleted again): 256,466 visible characters, 468,852 elements, **45.3%
+  With one array the rate fell with the document's size (tombstones included); with blocks it stays flat. A second
+  replica applying all 95,043 operations in order: 3,338 a second (28.5 s) with one array, 374,736 (254 ms) with
+  blocks; from JSON text through the strict decoder, 3,425 and 199,664 a second (so with blocks the decoder is about
+  half the cost). A 100,000-character paste into the middle: 20.5 ms locally and 24.0 ms remotely before, 16.9 and 12.3
+  ms after (10 operations). At the end (the paste deleted again): 256,466 visible characters, 468,852 elements, **45.3%
   tombstones**; a snapshot of 10,333,000 bytes (40.3 per visible character, 76,336 operations) against a session log
-  of 12,777,386 (49.8). At 20,000 edits (seed 1, `npm run editing -w @coedit/crdt -- 20000`): 50,240 edits/s in the
-  first tenth falling to 8,006, 69.4% tombstones, and a replica rebuilt from the snapshot takes 186 bytes of heap per
-  element (the mean of three kept at once, at `f89e5c0`; the first version of the script measured one copy and printed
-  a negative size at 100,000 edits).
+  of 12,777,386 (49.8). A replica rebuilt from the snapshot takes 212 bytes of heap per element with blocks (the mean of
+  three kept at once; the first version of the script measured one copy and printed a negative size at 100,000 edits,
+  fixed in `f89e5c0`). At 20,000 edits (`npm run editing -w @coedit/crdt -- 20000`, one array): 50,240 edits/s in the
+  first tenth falling to 8,006, 69.4% tombstones, 186 bytes of heap per element.
 
 - **What storage costs** (`npm run storage -w @coedit/server`, at `477dd82`'s script, its first run): 2,000
   one-character messages submitted one after another:
@@ -154,10 +157,19 @@ mine running unless said. The editing session is synthetic (a seeded random mode
 
   On macOS Node's fsync is `F_FULLFSYNC` (it waits for the drive), so durable acknowledgements cap one server at
   about 340 messages a second; group commit would lift that (not built). A document of 100,000 log entries (11,964,458
-  bytes; one-character inserts, every sixth entry a backspace): opened from its log alone in 7,235 ms, a snapshot of it
-  written in 143 ms (9,609,593 bytes, with fsync), opened from the snapshot in 6,137 ms. The snapshot barely helps,
-  because each of its runs is placed by the same scan: loading is the array's O(n) placement done n times, and it
-  blocks the server's event loop while it runs.
+  bytes; one-character inserts, every sixth entry a backspace), three runs:
+
+  | Code                                        | Open from the log | Write a snapshot | Open from the snapshot |
+  | ------------------------------------------- | ----------------: | ---------------: | ---------------------: |
+  | one array (`477dd82`)                       |          7,235 ms |           143 ms |               6,137 ms |
+  | blocks, sequence-order snapshot (`8e8f5cf`) |            467 ms |           109 ms |               2,350 ms |
+  | blocks, id-order snapshot (`6da3de0`)       |            481 ms |           115 ms |                 344 ms |
+
+  With one array each run's placement scanned from the start, so loading was O(n) done n times either way. With
+  blocks the log loads in under half a second, but the first snapshot order (each run where its first element sits
+  in the sequence) was five times slower than the log: a tombstone typed early sits after everything typed after it
+  at its spot, and placing it scanned past all of that. Runs in id order stop just after their origin. The snapshot
+  file is 9,609,593 bytes. Loading still blocks the server's event loop while it runs.
 
 - **Two browsers** (`npm run e2e -w @coedit/client`): 4 Playwright tests, 4.6 s here; CI runs them in a job of their
   own on the runner's Chrome.
@@ -363,6 +375,37 @@ Measured on an Apple M3 (macOS 26.6.2, Node 23.11.0, on AC, awake throughout). A
 - `packages/client/e2e/two-browsers.spec.ts` (day 4): see Results.
 - `review1-*.test.ts`, `review2-*.test.ts`: the reviews' findings, each of which failed before its fix.
 
+## Review of day 4
+
+One review agent, in its own worktree at `34380fd` (persistence, the snapshot path and the e2e tests; the blocks came
+after), with a correctness brief listing the day's claims, writing each finding as a failing test (the `review-d4-`
+files in `packages/server/test/`); about 17 minutes. It reproduced three defects, all in what happens when a step of
+storage fails, and its notes gave two more:
+
+1. **A failed prune made the document unopenable later.** `snapshot()` took a segment off its list before deleting
+   its file; if the delete failed, the store forgot a file still on disk, later snapshots deleted the segments after
+   it, and opening then found a gap and refused the whole document. A segment now leaves the list only once its file
+   is gone, and a failed deletion is logged and tried again at the next snapshot (`07f090e`).
+2. **A failing snapshot was retried on every message, leaving a copy each time.** The temporary file stayed, and the
+   hub's "an interval since the last snapshot" stayed true, so a rename that kept failing wrote the whole document
+   again per keystroke. The temporary file is removed on failure, and the next attempt waits an interval (`07f090e`).
+3. **A new document's directory was never synced in its parent**, so with fsync on a power loss could still take the
+   directory and every fsynced entry in it. `open()` now syncs the parent of each directory it creates (`9bb0ef5`).
+4. **A new segment that couldn't be opened after a snapshot** (EMFILE) threw after the snapshot was in place, so the hub
+   counted it as failed and every older snapshot stayed: another full copy on disk per attempt. Now only the
+   snapshot's own write throws; the rest is logged and tried again at the next snapshot (`8e8f5cf`).
+5. **A refused document had already been changed**: the torn tail was truncated while reading, before the checks that
+   could still refuse the document. The cut now comes after every check (`8e8f5cf`).
+
+What held: crashing at every file-system call of `snapshot()` in turn (its probe), the client's outbox rule after a
+snapshot (no case left an operation unacknowledged forever), descriptors across every server path, and
+`Rga.snapshot`. It listed eleven mechanisms it could remove with every test passing, mostly fsyncs nothing checked;
+nine now have tests (`f5e207e`: which files are synced and in what order, the hub relaying only after the sync, the
+snapshot "leaves something waiting" check, descriptors closed on refused documents, a failed hub's members, adjacent
+tombstone spans), each re-run as a mutant and failing; the other two are equivalent (replaying entries a snapshot
+already holds; forgetting a partial snapshot on a dropped connection, which the next one replaces). Seven stale
+comments and DESIGN lines were fixed (`3e706d2`).
+
 ## Review of day 3
 
 One review agent at a time, in its own worktree, with a correctness brief listing the day's claims, writing each
@@ -542,9 +585,9 @@ support this machine's Node 23).
 - **Tombstones are never collected.** 45% of the elements at the end of the synthetic 100,000-edit session, at about
   186 bytes of heap each. DESIGN.md "Tombstones" has the rule that makes removing one safe and what knowing it's safe
   needs (an "applied up to" message, a retention window, a resync for clients returning past it); none of it is built.
-- **The element array is scanned for every operation**: 1,462 local edits a second at 369,000 elements, and loading a
-  document of 100,000 entries takes 6 to 7 s whether from the log or a snapshot, with the server's event loop blocked
-  for all of it (every client of every document waits). A tree or blocks of elements with counts would fix both.
+- **Positions are found in blocks, not a tree**: about n / 512 + 512 steps an operation, flat at the sizes measured
+  (256,670 local edits a second at 369,000 elements), but still linear in the number of blocks. Loading a document
+  blocks the server's event loop (344 to 481 ms for 100,000 entries), and every client of every document waits.
 - **Durable acknowledgements cost an fsync a message**: about 340 messages a second per server on this Mac. Each
   message's entries are one write and one fsync; there's no group commit.
 - **One server per data directory.** Nothing locks it: two servers on one directory would interleave appends.

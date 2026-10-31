@@ -451,10 +451,15 @@ backspaces, jumps, selections, pastes). Local edits run at about 21,000 a second
 all 95,043 operations manages about 3,300 a second, the same from JSON through the strict decoder, so the decoder
 isn't the cost; placement is.
 
-**Is that a problem?** Not for typing: a person makes a few edits a second. It is for big documents: loading a
-document of 100,000 one-character entries takes 6 to 7 s, from the log or from a snapshot alike (each run is placed by
-the same scan), and the server's event loop is blocked for all of it. The fix is a tree, or blocks of elements with
-visible counts, behind the same interface; not built yet.
+**Was that a problem, and what did you do?** Not for typing: a person makes a few edits a second. It was for big
+documents: loading a document of 100,000 one-character entries took 6 to 7 s, with the server's event loop blocked.
+So the elements went into blocks of 512, each counting its visible elements, each element pointing at its block:
+finding a visible index skips whole blocks, finding an element's position is its block's index plus an `indexOf`.
+The same session then ran at about 257,000 local edits a second at 369,000 elements (from 1,462), and the document
+loads in under half a second. The interface didn't change, and `rga-blocks.test.ts` checks the new structure against
+the old one: the same random sessions with blocks of 1 to 3 elements (splitting all the time) and with one block that
+never splits must give exactly the same operations, changes, positions, text and state. Six one-line mutants of the
+block code each fail it.
 
 **How big do documents get?** In that session 45% of the elements are tombstones at the end; each element is about
 186 bytes of heap; a snapshot is about 40 bytes per visible character and the log about 50 (JSON around a few

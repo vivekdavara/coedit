@@ -143,12 +143,16 @@ the `deleteCount` visible elements from `index` and an insert whose origin is th
 `HEAD`). Applying a remote operation reports the visible change it made (inserted `n` at `i`, deleted `n` at `i`), so
 the client can patch the textarea and shift the caret instead of re-rendering everything.
 
-The first implementation keeps the elements in one array and finds positions by scanning: O(n) per operation, simple
-and easy to test. Day 4 measured it (README "Results (day 4)"): local edits fall from about 50,000 a second at
-11,000 elements to about 1,460 at 369,000, and loading a document of 100,000 one-character entries takes 6 to 7 s,
-since placing each run scans from the start. Fine for typing, too slow for large documents and for loading them; an
-order-statistics tree (or blocks of elements with visible counts) would replace the array behind the same interface.
-It isn't built yet.
+The first implementation kept the elements in one array and found positions by scanning: O(n) per operation, simple
+and easy to test. Day 4 measured it (README "Results (day 4)"): local edits fell from about 50,000 a second at 11,000
+elements to about 1,460 at 369,000, and loading a document of 100,000 one-character entries took 6 to 7 s. Now the
+elements are in blocks (512 by default; one past 1,024 is split), each counting its visible elements, and each element
+knows its block: a visible index is found by skipping whole blocks by their counts, an element's position is its
+block's place plus an `indexOf` inside it, and a delete's pass skips blocks holding none of its targets. About
+n / 512 + 512 steps instead of n: 256,670 local edits a second at 369,000 elements, and the same document loads in
+under half a second. `rga-blocks.test.ts` runs the same sessions with blocks of 1 to 3 elements and with one block
+that never splits (the old array) and requires every output to match. A balanced tree would make it logarithmic; at
+these sizes the blocks are flat.
 
 ### The interface (day 2)
 
