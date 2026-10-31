@@ -7,6 +7,7 @@ import {
   MAX_MESSAGE_BYTES,
   MAX_OPS,
   ProtocolError,
+  batchEnd,
   batchOps,
   decodeClientMessage,
   decodeServerMessage,
@@ -161,6 +162,21 @@ describe('batchOps', () => {
           MAX_MESSAGE_BYTES,
       );
     }
+  });
+});
+
+describe('batchEnd', () => {
+  test("is where batchOps' batches end, from any start", () => {
+    const texts = Array.from({ length: 300 }, (_, i) =>
+      encodeOp(ins(i * 10_000 + 1, 'y'.repeat(((i * 7919) % 10_000) + 1))),
+    );
+    texts.push(...Array.from({ length: 1_500 }, (_, i) => encodeOp(ins(4_000_000 + i, 'z'))));
+    let start = 0;
+    for (const batch of batchOps(texts)) {
+      assert.equal(batchEnd(texts, start), start + batch.length);
+      start += batch.length;
+    }
+    assert.equal(batchEnd(texts, texts.length), texts.length);
   });
 });
 

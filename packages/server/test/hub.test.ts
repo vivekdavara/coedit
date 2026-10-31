@@ -2,7 +2,9 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
+  MAX_MESSAGE_BYTES,
   decodeServerMessage,
+  utf8Length,
   encodeServerMessage,
   type Cursor,
   type DeleteOp,
@@ -170,10 +172,10 @@ describe('a paced catch-up', () => {
     hub.presence(a, { anchor: { replica: 'a', counter: 1 }, head: null });
     assert.equal(hub.submit(a, chain(10, 1_501)), null);
     let messages = slow.take();
-    // The presence relay goes out at once; ops wait for the catch-up.
+    // Neither the ops nor the presence go to it live: it's still catching up.
     assert.deepEqual(
       messages.map((m) => (m.type === 'ops' ? [m.from, m.ops.length] : m.type)),
-      ['welcome', [1, 1_000], 'presence'],
+      ['welcome', [1, 1_000]],
     );
     slow.drain();
     messages = slow.take();
@@ -194,6 +196,50 @@ describe('a paced catch-up', () => {
     assert.deepEqual(
       slow.take().map((m) => (m.type === 'ops' ? m.from : m.type)),
       [1_511],
+    );
+  });
+
+  test('every catch-up message fits 1 MiB, and a member never gets its own cursor', () => {
+    const hub = new DocumentHub('d');
+    const a = joined(hub, 'a');
+    assert.equal(hub.submit(a, [insert(1, 'a', null, 'x'.repeat(1_000))]), null);
+    // About 40 KB each: 25 fit a message.
+    const big = del(
+      ...Array.from({ length: 1_000 }, (_, i): [number, string, number] => [i + 1, 'a', 1]),
+    );
+    for (let i = 0; i < 60; i++) assert.equal(hub.submit(a, [big]), null);
+    const slow = new SlowMember('slow');
+    hub.join(slow, 0);
+    // Its own cursor, sent during its catch-up, and someone else's.
+    hub.presence(slow, { anchor: { replica: 'a', counter: 3 }, head: null });
+    hub.presence(a, { anchor: { replica: 'a', counter: 5 }, head: null });
+    const sent: string[] = [];
+    for (let i = 0; i < 10 && slow.pending.length > 0; i++) {
+      sent.push(...slow.texts.splice(0));
+      slow.drain();
+    }
+    sent.push(...slow.texts.splice(0));
+    const messages = sent.map(decodeServerMessage);
+    // Every entry once, in order, in more than one message.
+    let next = 1;
+    for (const m of messages) {
+      if (m.type !== 'ops') continue;
+      assert.equal(m.from, next);
+      next += m.ops.length;
+    }
+    assert.equal(next, 62);
+    assert.ok(messages.filter((m) => m.type === 'ops').length >= 3);
+    for (const text of sent)
+      assert.ok(utf8Length(text) <= MAX_MESSAGE_BYTES, `${utf8Length(text)} bytes`);
+    assert.deepEqual(
+      messages.filter((m) => m.type === 'presence'),
+      [
+        {
+          type: 'presence',
+          replica: 'a',
+          cursor: { anchor: { replica: 'a', counter: 5 }, head: null },
+        },
+      ],
     );
   });
 

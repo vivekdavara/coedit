@@ -201,22 +201,31 @@ function checkBatch(texts: readonly string[]): void {
  * and MAX_MESSAGE_BYTES in all. An operation is at most about 90 KB (a delete of 1,000 spans), so each fits.
  */
 export function batchOps(texts: readonly string[]): string[][] {
-  const limit = MAX_MESSAGE_BYTES - OPS_ENVELOPE_BYTES;
   const batches: string[][] = [];
-  let batch: string[] = [];
-  let bytes = 0;
-  for (const text of texts) {
-    const size = utf8Length(text) + 1; // and a comma
-    if (batch.length === MAX_OPS || (batch.length > 0 && bytes + size > limit)) {
-      batches.push(batch);
-      batch = [];
-      bytes = 0;
-    }
-    batch.push(text);
-    bytes += size;
+  for (let start = 0; start < texts.length;) {
+    const end = batchEnd(texts, start);
+    batches.push(texts.slice(start, end));
+    start = end;
   }
-  if (batch.length > 0) batches.push(batch);
   return batches;
+}
+
+/**
+ * Where the batch that batchOps would start at `start` ends (exclusive), looking at no more operations than it
+ * holds: the server's catch-up takes one batch at a time, and measuring 1,000 operations to keep the 25 that fit
+ * made a 117 MiB catch-up take 5.5 s instead of 0.18 s (review 2 of day 3).
+ */
+export function batchEnd(texts: readonly string[], start: number): number {
+  const limit = MAX_MESSAGE_BYTES - OPS_ENVELOPE_BYTES;
+  let bytes = 0;
+  let end = start;
+  while (end < texts.length && end - start < MAX_OPS) {
+    const size = utf8Length(texts[end] as string) + 1; // and a comma
+    if (end > start && bytes + size > limit) break;
+    bytes += size;
+    end++;
+  }
+  return end;
 }
 
 /** The number of bytes `value` takes in UTF-8. A lone surrogate counts 3, as TextEncoder writes U+FFFD for it. */

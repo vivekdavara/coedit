@@ -11,10 +11,10 @@
 import {
   ConflictError,
   MAX_ERROR_MESSAGE_LENGTH,
-  MAX_OPS,
   PROTOCOL_VERSION,
   ProtocolError,
   Rga,
+  batchEnd,
   batchOps,
   codePoints,
   encodeOp,
@@ -96,9 +96,10 @@ export class DocumentHub {
   }
 
   /**
-   * Joins a member that has applied the log up to `have`: sends `welcome`, the entries after `have`, and the
-   * other members' cursors, then relays to it from then on. A member already joined with the same replica id is
-   * replaced (a client reconnecting before the server noticed its old connection drop).
+   * Joins a member that has applied the log up to `have`: sends `welcome`, then the entries after `have` up to the
+   * end of the log, however far it has got by then (#catchUp), then the other members' cursors, and relays to it from
+   * then on. A member already joined with the same replica id is replaced (a client reconnecting before the server
+   * noticed its old connection drop).
    */
   join(member: Member, have: number): Refusal | null {
     if (have > this.#log.length) {
@@ -131,7 +132,9 @@ export class DocumentHub {
    * Sends a joining member the log from `state.next` on, one batch at a time, each once the one before has been
    * written out, so a member reading as fast as it can is never dropped as a slow reader however long the log (the
    * review of day 3 found that writing it all at once did, at about 16 MiB of log). Entries logged meanwhile are sent
-   * the same way. When it reaches the end, the member gets the cursors shown and live relays from then on.
+   * the same way, and nothing else is sent to it until it reaches the end (no live ops, presence or leaves: those
+   * would count against the slow-reader limit with a batch in flight); then it gets the cursors shown and live
+   * relays. Each batch is found by measuring only the entries it holds (batchEnd).
    */
   #catchUp(member: Member, state: MemberState): void {
     for (;;) {
@@ -146,7 +149,7 @@ export class DocumentHub {
         }
         return;
       }
-      const batch = batchOps(this.#log.slice(next - 1, next - 1 + MAX_OPS))[0] as string[];
+      const batch = this.#log.slice(next - 1, batchEnd(this.#log, next - 1));
       state.next = next + batch.length;
       // Whether the send has called back yet, and whether this loop is still inside the send (a member that writes
       // synchronously calls back from within it: then the loop carries on, rather than recurse).
@@ -168,7 +171,9 @@ export class DocumentHub {
   leave(member: Member): void {
     if (!this.#members.delete(member)) return;
     const text = encodeServerMessage({ type: 'presence', replica: member.replica, cursor: null });
-    for (const other of this.#members.keys()) other.send(text);
+    // Members still catching up get the cursors shown when they reach the end of the log: a relay to them now would
+    // count against the slow-reader limit with a catch-up batch still in flight (review 2 of day 3).
+    for (const [other, state] of this.#members) if (state.next === null) other.send(text);
   }
 
   /**
@@ -273,7 +278,9 @@ export class DocumentHub {
       throw new Error(`${member.replica} isn't joined to ${this.doc}`);
     (this.#members.get(member) as MemberState).cursor = cursor;
     const text = encodeServerMessage({ type: 'presence', replica: member.replica, cursor });
-    for (const other of this.#members.keys()) if (other !== member) other.send(text);
+    for (const [other, state] of this.#members) {
+      if (other !== member && state.next === null) other.send(text);
+    }
   }
 }
 
