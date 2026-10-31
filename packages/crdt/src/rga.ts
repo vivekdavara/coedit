@@ -231,19 +231,23 @@ export class Rga {
     this.#makeRoom(chars.length);
 
     // The origin is the visible element before `index`; the targets are the `deleteCount` from it. The walk starts
-    // at the block holding the first of them.
+    // at the block holding the first of them, skips blocks with nothing visible, and stops at the last one needed:
+    // walking on to the next visible element crossed every tombstone after the caret, block by block, so typing
+    // after a large deletion cost what the single array did (review 2 of day 4).
     let origin: Element | null = null;
     const targets: Element[] = [];
-    if (index + deleteCount > 0) {
+    const end = index + deleteCount;
+    if (end > 0) {
       const from = this.#findVisible(Math.max(index - 1, 0));
       let visible = from.before;
       walk: for (let b = from.b; b < this.#blocks.length; b++) {
-        for (const e of (this.#blocks[b] as Block).elements) {
+        const block = this.#blocks[b] as Block;
+        if (block.visible === 0) continue;
+        for (const e of block.elements) {
           if (e.deleted) continue;
-          if (visible >= index + deleteCount) break walk;
           if (visible === index - 1) origin = e;
           else if (visible >= index) targets.push(e);
-          visible++;
+          if (++visible >= end) break walk;
         }
       }
     }
