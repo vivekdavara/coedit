@@ -1,7 +1,14 @@
 // The server's command line: `npm start -w @coedit/server`. Settings come from the environment:
-// COEDIT_HOST (default 127.0.0.1) and COEDIT_PORT (default 8110).
-import { DEFAULT_HOST, DEFAULT_PORT, startServer, type SyncServer } from './server.ts';
-import { hostPort, parsePort } from './config.ts';
+// COEDIT_HOST (default 127.0.0.1), COEDIT_PORT (default 8110), and COEDIT_ORIGINS (the web origins whose pages may
+// connect, separated by commas; default the client's dev server, http://localhost:5173 and http://127.0.0.1:5173).
+import {
+  DEFAULT_HOST,
+  DEFAULT_ORIGINS,
+  DEFAULT_PORT,
+  startServer,
+  type SyncServer,
+} from './server.ts';
+import { hostPort, parseOrigins, parsePort } from './config.ts';
 
 const host = process.env['COEDIT_HOST'] ?? DEFAULT_HOST;
 if (host === '') {
@@ -18,9 +25,18 @@ if (port === undefined) {
   process.exit(2);
 }
 
+const originsText = process.env['COEDIT_ORIGINS'];
+const origins = originsText === undefined ? DEFAULT_ORIGINS : parseOrigins(originsText);
+if (origins === undefined) {
+  console.error(
+    `COEDIT_ORIGINS must be origins like http://localhost:5173, separated by commas, not ${JSON.stringify(originsText)}`,
+  );
+  process.exit(2);
+}
+
 let server: SyncServer;
 try {
-  server = await startServer({ host, port });
+  server = await startServer({ host, port, origins });
 } catch (error) {
   console.error(`can't listen on ${hostPort(host, port)}: ${(error as Error).message}`);
   process.exit(1);

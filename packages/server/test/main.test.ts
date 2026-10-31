@@ -5,6 +5,7 @@ import { once } from 'node:events';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { describe, test, type TestContext } from 'node:test';
+import { WebSocket } from 'ws';
 import { hostPort } from '../src/config.ts';
 
 const MAIN = fileURLToPath(new URL('../src/main.ts', import.meta.url));
@@ -103,6 +104,45 @@ describe('main', () => {
       assert.equal(await run.exit, 2, port);
       assert.match(run.stderr(), /COEDIT_PORT must be a port number from 0 to 65535/);
     }
+  });
+
+  test('refuses a bad COEDIT_ORIGINS with exit 2', async (t) => {
+    for (const origins of [
+      'http://localhost:5173/',
+      'localhost:5173',
+      'http://a,ftp://b',
+      'http://a,,http://b',
+    ]) {
+      const run = start(t, { COEDIT_ORIGINS: origins, COEDIT_PORT: '0' });
+      assert.equal(await run.exit, 2, origins);
+      assert.match(run.stderr(), /COEDIT_ORIGINS must be origins like http:\/\/localhost:5173/);
+    }
+  });
+
+  test('COEDIT_ORIGINS sets which pages may open a sync connection', async (t) => {
+    const run = start(t, {
+      COEDIT_ORIGINS: 'http://example.test, http://localhost:4000',
+      COEDIT_PORT: '0',
+    });
+    const url = (await listening(run)).replace('http://', 'ws://');
+    const status = (origin: string) =>
+      new Promise<number | 'open'>((resolve) => {
+        const ws = new WebSocket(`${url}/sync`, { origin });
+        ws.once('open', () => {
+          ws.terminate();
+          resolve('open');
+        });
+        ws.once('unexpected-response', (_request, response) => {
+          resolve(response.statusCode ?? 0);
+          ws.terminate();
+        });
+        ws.once('error', () => {});
+      });
+    assert.equal(await status('http://example.test'), 'open');
+    assert.equal(await status('http://localhost:4000'), 'open');
+    assert.equal(await status('http://localhost:5173'), 403);
+    run.child.kill('SIGTERM');
+    assert.equal(await run.exit, 0);
   });
 
   test('refuses an empty COEDIT_HOST, which Node would read as every interface', async (t) => {

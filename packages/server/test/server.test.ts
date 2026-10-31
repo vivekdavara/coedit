@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
 import { after, before, describe, test } from 'node:test';
 import { PROTOCOL_VERSION } from '@coedit/crdt/protocol';
-import { parsePort } from '../src/config.ts';
+import { parseOrigins, parsePort } from '../src/config.ts';
 import { startServer, type SyncServer } from '../src/server.ts';
 
 describe('health endpoint', () => {
@@ -110,6 +110,40 @@ describe('parsePort', () => {
       '8110.0',
     ]) {
       assert.equal(parsePort(text), undefined, JSON.stringify(text));
+    }
+  });
+});
+
+describe('parseOrigins', () => {
+  test('reads origins separated by commas, spaces around them allowed', () => {
+    assert.deepEqual(parseOrigins('http://localhost:5173'), ['http://localhost:5173']);
+    assert.deepEqual(parseOrigins(' http://a.test , https://b.test:8443 '), [
+      'http://a.test',
+      'https://b.test:8443',
+    ]);
+    assert.deepEqual(parseOrigins('http://[::1]:5173'), ['http://[::1]:5173']);
+  });
+
+  test('an empty setting allows no page', () => {
+    assert.deepEqual(parseOrigins(''), []);
+    assert.deepEqual(parseOrigins('  '), []);
+  });
+
+  test('refuses anything that is not an origin', () => {
+    for (const text of [
+      'localhost:5173',
+      'http://localhost:5173/',
+      'http://localhost:5173/x',
+      'ftp://a',
+      'http://',
+      'http://a:0',
+      'http://a:05173',
+      'http://a,,http://b',
+      'http://a b',
+      'null',
+      '*',
+    ]) {
+      assert.equal(parseOrigins(text), undefined, JSON.stringify(text));
     }
   });
 });
