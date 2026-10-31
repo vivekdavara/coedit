@@ -281,20 +281,70 @@ Server to client:
 | `presence` | `replica`, `cursor`      | someone's selection (`cursor: null`: they left or hid it)          |
 | `error`    | `code`, `message`        | refused; the server closes the connection after it                 |
 
+Error codes: `malformed`, `unsupported-protocol`, `unexpected-message`, `refused-op`, `too-large` (the document is
+full), `ahead-of-server` (below) and `server-error`, the only one a client retries after.
+
 - **The server orders.** It numbers every operation it accepts 1, 2, 3, ... in its log and relays each one to every
   client of the document, the sender included. The echo is the acknowledgement: a client drops an operation from its
   outbox when it comes back with a sequence number, and the CRDT ignores the duplicate. It costs the sender a copy of
   its own edits; in exchange every client sees the same numbered log, and `have` means the same thing for all.
 - **Reconnect.** The client remembers the last sequence number it applied. On reconnect it sends `hello` with it,
-  receives what it missed, then resends its whole outbox. Both go in as many messages as it takes at 1,000
-  operations each. The server applies operations to its own replica first, so
-  a resent operation it already has is recognized and not logged twice.
-- **The server validates by applying.** An operation the server's replica refuses (bad shape, same id with different
-  content, counter not above its origin's) gets an `error` and the connection is closed; nothing is relayed.
+  receives what it missed (up to the `seq` in `welcome`), and only then resends its whole outbox. Both go in batches
+  of at most 1,000 operations and 1 MiB. Whatever was echoed by then has left the outbox, so what is resent is what
+  the server hadn't logged when this client joined.
 - **Presence** positions are ids, not indices ("after element X", or `HEAD`), so a cursor stays by its text when
-  others edit before it. Presence is never logged; a client resends it on reconnect and the server sends
-  `cursor: null` for a client that disconnects.
+  others edit before it. Presence is never logged; a client resends it on reconnect, after its operations (so the
+  others can place it), and the server sends `cursor: null` for a client that disconnects or is replaced.
 - **Limits**: a message is at most 1 MiB, a document name 1 to 64 characters of `A-Z a-z 0-9 _ -`.
+
+### What the server accepts (day 3)
+
+The server's replica is the referee: it applies each operation before logging it, and an operation it refuses gets
+an `error` and the connection is closed; nothing after it in that message is applied, and the ones before it stay
+logged and relayed. It refuses:
+
+- **An operation whose dependencies it hasn't placed** (`Rga.ready`): an insert whose origin isn't an element here,
+  a delete naming any id that isn't. So the server never holds a waiting operation, and its log is in causal order.
+  A delete's spans are checked run by run: from a span's first id, look up its element, skip to the end of that
+  element's run, repeat. A span over one long run is one lookup, so the largest delete the wire format allows (1,000
+  spans of 10,000 ids) costs 1,000 lookups to check, not 10 million (`rga-ready.test.ts` counts them).
+- **An insert ending more than the capacity past the server's clock.** Every replica's clock takes the largest
+  counter it receives, so one insert numbered near 2^53 - 1 would use up every clock for good. An honest client's
+  counters are at most the server's clock (it has seen nothing newer: everything it has came from the server or from
+  itself) plus the elements it has made since, which its own capacity bounds. So the server refuses an insert whose
+  last counter is more than its capacity (2^23 - 1) past its clock. Then each accepted insert moves the clock at most
+  a capacity on, each makes at least one element, and the server holds at most a capacity of elements: the clock
+  stays below capacity squared, about 2^46, and can't run out before the document is full. A delete can't move
+  anyone's clock past an id that exists, since it may only name placed elements.
+- **A reused id** (`ConflictError`): the server keeps the first and refuses the second, so clients only ever see its
+  choice. **A full document** (the capacity): code `too-large`. **A malformed message**: `malformed`.
+
+What it logs:
+
+- **An insert it already holds** (the same run: a client resending after a reconnect) is not logged again and not
+  echoed: its first copy was echoed, or will be, to the sender while that operation was in the sender's outbox.
+- **A delete is logged every time it arrives**, even when it changes nothing. Its sender waits for an echo, and the
+  server can't tell a resend from another client's byte-identical delete of the same text, which needs its own echo.
+  A repeated delete changes nothing anywhere.
+
+### Connections (day 3)
+
+- `hello` first, within 10 seconds; `ops` or `presence` before it, a second `hello`, a binary message, or a message
+  over 1 MiB end the connection. Each refusal is an `error` with its code, then close code 1008 (1011 after
+  `server-error`); a message over 1 MiB is closed with 1009 without one, since the server stops reading at the limit.
+- A `have` past the end of the server's log is refused with `ahead-of-server`: the server has lost entries the
+  client applied (until day 4 a restart loses everything). The client stops and keeps its text.
+- A second connection with the same replica id replaces the first (close code 4001): a client reconnecting before
+  the server noticed its old connection drop.
+- **Origins.** A browser lets any page open a WebSocket to any address and sends the page's origin with the
+  handshake, so without a check any site open in the same browser could read and edit every document on a local
+  server. A handshake whose `Origin` isn't allowed gets HTTP 403. The default allows the client's dev server
+  (`http://localhost:5173`, `http://127.0.0.1:5173`); `COEDIT_ORIGINS` sets the list. A handshake without an
+  `Origin` (not a browser: the tests, a script) is let through.
+- **Dead connections.** The server pings every connection every 30 seconds and drops one that hasn't answered the
+  previous ping; a laptop whose lid closed sends no close, and its cursor would otherwise stay until TCP gives up.
+- **A client that stops reading** is dropped once 16 MiB is queued for it. It reconnects and catches up from the log,
+  which is what makes dropping it safe.
 
 ## The client (day 3)
 
@@ -307,11 +357,27 @@ A `<textarea>`, not `contenteditable`: plain text with a selection API that beha
   could have inserted at any of three places, and the caret says which. The edit found can be bigger than the
   smallest one, when it's what was typed: replacing "orld" by "and" is a delete of 4 and an insert of 3, although
   keeping the old "d" would be smaller; which element is kept decides where a concurrent insert next to it lands.
-- **Remote changes.** A remote operation's visible change is applied to the text, and the caret and selection move
-  with it: an insert before the caret shifts it right, a delete around it pulls it to the delete's start.
+- **Remote changes** (`packages/client/src/textarea.ts`) are applied to the textarea's text in place, and the
+  selection moves with them: an insert strictly before a position shifts it right; an insert exactly at it leaves it
+  before the new text, because the caret means "just after the element before me" and the new text went after that
+  element too (so the next character typed lands there, before the new text, as RGA would place it); a delete before
+  a position shifts it left, and one around it pulls it to where the deleted text began. Changes come in code points
+  and the textarea counts UTF-16 units, so each change is converted against the text just before it.
+- **The sync client** (`packages/client/src/sync.ts`) holds the replica and the outbox. Echoes come back in the order
+  the client sent its operations, so only the outbox's first operation can match one, compared by canonical text; a
+  byte-identical delete from someone else counts as the echo (its effect is the same). A dropped connection is
+  retried with doubling backoff from 250 ms to 10 s, with jitter, reset at each `welcome`. An `error` other than
+  `server-error` stops the client for good, since retrying would be refused the same way.
 - **IME composition** (typing Chinese, Japanese, accented letters by dead keys): while a composition is open the
-  browser owns the textarea, so remote changes wait until it ends.
-- **Offline**: the outbox lives in memory, so it survives a dropped connection but not a closed tab.
+  browser owns the textarea, so remote operations are held, received but not applied, and the composition becomes one
+  edit when it ends; then the held operations apply. The edit is found against the text from before the composition,
+  so the replica must still hold that text.
+- **Cursors.** The others' carets and selections are drawn in a copy of the text laid out like the textarea's (same
+  font, padding, wrapping and scrollbar gutter), behind it, with the text transparent; each replica gets its own hue.
+- **Offline**: the outbox lives in memory, so it survives a dropped connection but not a closed tab. A "Go offline"
+  switch closes the connection until it's pressed again.
+- **One origin.** The page opens its socket at `/sync` on its own host; the dev server and `vite preview` pass it on to
+  the sync server (`COEDIT_SYNC_TARGET`, default `ws://127.0.0.1:8110`).
 
 ## Persistence and tombstones (day 4)
 
