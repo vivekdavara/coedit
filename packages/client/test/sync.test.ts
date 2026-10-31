@@ -1,6 +1,9 @@
 // The sync client against the real server, over real WebSockets (Node's own): clients converge with the server,
 // edits made offline arrive, cursors travel, and the failures a user can meet end the way the client says.
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { startServer, type SyncServer } from '@coedit/server';
 import type { Change } from '@coedit/crdt';
@@ -209,6 +212,80 @@ describe('clients and the server', () => {
       a.c.stop();
     } finally {
       await small.close();
+    }
+  });
+
+  test('a server restarted on its data directory: the client goes on where it was', async (t) => {
+    const data = fs.mkdtempSync(path.join(os.tmpdir(), 'coedit-client-'));
+    t.after(() => {
+      fs.rmSync(data, { recursive: true, force: true });
+    });
+    const first = await startServer({ port: 0, dataDir: data, fsync: false });
+    const a = client(first, 'kept');
+    t.after(() => {
+      a.c.stop();
+    });
+    a.c.start();
+    await eventually(() => a.c.status === 'online');
+    a.edit(0, 0, 'abc');
+    await settled(first, 'kept', [a.c]);
+    const port = first.port;
+    await first.close();
+    a.edit(3, 0, 'd'); // while the server is down
+    const second = await startServer({ port, dataDir: data, fsync: false });
+    try {
+      await settled(second, 'kept', [a.c]);
+      assert.equal(a.c.rga.text(), 'abcd');
+      assert.ok(!a.statuses.includes('failed'));
+    } finally {
+      await second.close();
+    }
+  });
+
+  test('a client far behind gets a snapshot: its logged edits acknowledged, its unsent ones sent', async (t) => {
+    const data = fs.mkdtempSync(path.join(os.tmpdir(), 'coedit-client-'));
+    t.after(() => {
+      fs.rmSync(data, { recursive: true, force: true });
+    });
+    const s = await startServer({ port: 0, dataDir: data, fsync: false, snapshotEvery: 5 });
+    try {
+      const doc = 'far';
+      const writer = client(s, doc);
+      const behind = client(s, doc);
+      // Stopped however the test ends: a client left retrying keeps the test file from exiting.
+      t.after(() => {
+        writer.c.stop();
+        behind.c.stop();
+      });
+      writer.c.start();
+      behind.c.start();
+      await eventually(() => writer.c.status === 'online' && behind.c.status === 'online');
+      behind.edit(0, 0, 'b');
+      await settled(s, doc, [writer.c, behind.c]);
+      behind.c.stop();
+      // Offline: one more edit, and a delete of its own text, neither sent.
+      behind.edit(1, 0, 'B');
+      behind.edit(0, 1, '');
+      // Meanwhile 30 entries, one a message, so the log kept starts well after what `behind` has.
+      for (let i = 0; i < 30; i++) {
+        writer.edit(writer.c.rga.length, 0, String(i % 10));
+        await eventually(() => writer.c.unacknowledged === 0);
+      }
+      assert.ok((s.inspect(doc)?.seq ?? 0) > 30);
+      behind.c.start();
+      await settled(s, doc, [writer.c, behind.c]);
+      assert.equal(
+        behind.shown(),
+        behind.c.rga.text(),
+        'the textarea was patched with the snapshot',
+      );
+      // 'B' and the writer's '0' were both typed after 'b' with counter 2: their replica ids (random) decide which
+      // goes first, and the writer's run stays whole either way.
+      const typed = Array.from({ length: 30 }, (_, i) => String(i % 10)).join('');
+      assert.ok([`B${typed}`, `${typed}B`].includes(behind.c.rga.text()), behind.c.rga.text());
+      assert.equal(writer.c.rga.text(), behind.c.rga.text());
+    } finally {
+      await s.close();
     }
   });
 });
