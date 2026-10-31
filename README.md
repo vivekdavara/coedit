@@ -89,6 +89,41 @@ two tabs (or two browsers) and type in both. The dev server passes `/sync` on to
 in the outbox and merge when it's pressed again. Each tab is a new replica, so a reload starts from the server's log
 (edits not yet acknowledged are lost with the tab).
 
+## Results (day 3)
+
+Measured on the Apple M3 (macOS 26.6.2, Node 23.11.0), **on battery** (46% at the start of the session, 26% by
+22:44), no sleep in `pmset -g log` during the session and none during each latency run (the script checks). All
+inputs are synthetic; everything runs over loopback.
+
+- **Edit to acknowledgement and to the other clients** (`npm run sync-latency -w @coedit/client`, at `4214531`, with
+  the first review agent running tests alongside, so read these as an upper bound for this machine): a writer types
+  one character every 5 ms at the end of the text, 2,000 edits of which the first 200 are a warm-up, paced by the
+  clock; the server is its own process; the writer and the readers share one process. Nearest-rank percentiles, in
+  milliseconds:
+
+  | Readers | Run | ack p50 | ack p99 | ack max | remote p50 | remote p95 | remote p99 | remote max |
+  | ------: | --: | ------: | ------: | ------: | ---------: | ---------: | ---------: | ---------: |
+  |       3 |   1 |    0.56 |    1.94 |    5.19 |       0.77 |       1.57 |       2.48 |       6.02 |
+  |       3 |   2 |    0.55 |    2.19 |   13.32 |       0.75 |       1.44 |       2.71 |      13.59 |
+  |      10 |   1 |    0.54 |    1.86 |    4.58 |       1.00 |       2.05 |       3.26 |       8.22 |
+
+  "remote" counts each reader's copy (5,400 and 18,000 samples). A round trip through the server costs about half a
+  millisecond here; network latency would dominate any real deployment.
+
+- **Convergence end to end** (`packages/client/test/sync-convergence.test.ts`, 100 generated schedules on the real
+  server, about 4 s): five runs made 1,012 to 1,134 edits and 153 to 179 dropped connections each, plus offline
+  spells; every schedule ended with every client's replica state equal to the server's. The test fails below 700
+  edits or 100 drops.
+- **Checking the largest delete** (`Rga.ready`, run by run): 1,000 lookups for 1,000 spans of 10,000 ids over one
+  run, counted in `rga-ready.test.ts`; an id-by-id version took about 110 ms for the same delete.
+- **One message of overlapping deletes** (the review's case, `review-d3-overlap-dos.test.ts`): before the fix it kept
+  the event loop busy 5.3 to 5.5 s in the review's runs and 12.9 s in mine on battery; now its first delete is
+  refused at once.
+- **A long catch-up** (`review-d3-catchup-drop.test.ts`): a fresh client joining a document whose log is about 32
+  MiB (801 entries), with the slow-reader limit at 256 KiB, now receives all of it (the test, which builds the log
+  first, takes about 3 s); before the fix it received nothing and was dropped on every attempt.
+- **Tests**: 252 at the start of the day (`c60a050`), 369 at `692bb29` (`npm test`); CI green on Node 22 and 24.
+
 ## Results (day 2)
 
 Measured on the same Apple M3 (macOS 26.6.2, Node 23.11.0, on AC, no sleep in `pmset -g log`). All inputs are
@@ -231,6 +266,33 @@ Measured on an Apple M3 (macOS 26.6.2, Node 23.11.0, on AC, awake throughout). A
   `test/exports.test.ts`: every workspace export imports.
 - `review1-*.test.ts`, `review2-*.test.ts`: the reviews' findings, each of which failed before its fix.
 
+## Review of day 3
+
+One review agent at a time, in its own worktree, with a correctness brief listing the day's claims, writing each
+finding as a failing test (the `review-d3-` files in `packages/server/test/` hold them).
+
+**Round 1** (at `f76b10f`, everything built today; about 18 minutes) reproduced 3 defects, all in the server:
+
+1. **A long document couldn't be opened.** `join` wrote the whole catch-up at once and the slow-reader rule counted it,
+   so a client reading as fast as it could was dropped part way through once the log after its `have` passed the limit
+   plus what the kernel absorbs, then dropped again on every reconnect: with the default 16 MiB, about 150,000
+   one-character inserts. The catch-up now goes one batch at a time, each once the one before is written out, and only
+   live sends count (`ca5cdae`).
+2. **One message under 1 MiB blocked the server for about 5 s**: a delete may name the same 10,000 ids in each of its
+   1,000 spans, and applying walks every id named. No replica writes overlapping spans, so the server refuses them;
+   then a delete's cost is bounded by the document's size (`f0e4ef8`).
+3. **A refused handshake, reset at once, crashed the server**: Node removes its own socket error listener before
+   `'upgrade'`, and the 404/403 answer was written without one, so a reset (EPIPE) was thrown (`d9429a4`).
+
+It also noted that the server didn't check an insert was under the sender's own replica id (a client could take
+another's next ids and get it stopped; refused since `060b0af`), that a refused hello created a document, and that
+`COEDIT_ORIGINS` accepted port 99999 and upper-case hosts (`692bb29`). Of its 44 mutants, the 10 it listed as
+surviving were: two of the batch size arithmetic, the hello timer's clear, the session's readyState guard, the client
+ignoring its own cursor, the welcome-behind check (all pinned in `a41bb33`), the origin port (pinned in `692bb29`),
+and three equivalent: two of the sync client's `#sent` counter, which was always 0 when read (removed, `0c487d3`), and
+one covered by `leave` being idempotent. Its docs list (a resent delete is logged again; ws closes 1009 and 1007
+without an error message; stale comments) is fixed in the code and DESIGN.md.
+
 ## Review of day 2
 
 One review agent at a time, each in its own worktree with a correctness brief, writing each finding as a failing test
@@ -369,6 +431,9 @@ support this machine's Node 23).
 - **Every operation still scans one array**, O(n) in elements including tombstones, on the server too; nothing is
   collected yet (day 4 measures and collects). The editor redraws the cursor mirror from the whole text on every
   change.
+- **Deletes are logged every time they arrive**, so a client can grow a document's log (held in memory) without
+  bound by sending deletes of text already deleted, about 1 MiB a message; and every document name anyone says
+  `hello` to stays in memory for the server's lifetime. Both wait for day 4's persistence and a retention rule.
 - **The cursor mirror only approximates the textarea's layout** (same font, padding, wrapping and scrollbar gutter);
   a browser that wraps a textarea differently from a div would draw a remote caret off by a line.
 - Day 2's limits that day 3 closes: clients now receive only what the server accepted, and the server refuses a
