@@ -47,6 +47,8 @@ or a crash never leaves a client ahead of the server.
 | Path                              | What                                                                             |
 | --------------------------------- | -------------------------------------------------------------------------------- |
 | `DESIGN.md`                       | the specification: RGA and why it converges, wire format, sync protocol          |
+| `WALKTHROUGH.md`                  | the questions an interviewer is likely to ask, answered from the code            |
+| `CHANGELOG.md`                    | what v1.0.0 holds                                                                |
 | `packages/crdt/src/rga.ts`        | the CRDT: insert, delete, waiting operations, conflicts, presence                |
 | `packages/crdt/src/ids.ts`        | the id order (counter, then replica by code unit) and a map keyed by ids         |
 | `packages/crdt/src/json.ts`       | a strict JSON reader (duplicate keys, lone surrogates, rounding: refused)        |
@@ -332,6 +334,10 @@ Measured on an Apple M3 (macOS 26.6.2, Node 23.11.0, on AC, awake throughout). A
   at `c1d40d0`, 0.3 to 2.4 s per case).
 
 ## Tests
+
+`npm test` runs 504 tests in 98 suites in about 18 s (Node's runner, files in parallel), and
+`npm run e2e -w @coedit/client` runs the 4 Playwright tests; CI runs both on every push (the suite on Node 22 and
+24). By file:
 
 - `packages/crdt/test/rga-convergence.test.ts`: RGA through the simulator with every freedom on, the real codec as
   the transport, the state check compulsory, the local model on, and every delivery's changes replayed; 2 to 5
