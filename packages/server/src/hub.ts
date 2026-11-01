@@ -489,7 +489,8 @@ export class DocumentHub {
     if (op.type === 'insert') {
       // Every replica's clock takes the largest counter it receives, so one insert numbered near 2^53 - 1 would use
       // up every clock for good. An honest client's counters are at most the server's clock (it has seen nothing
-      // newer) plus the elements it made since, which its capacity bounds; so the server refuses an insert ending
+      // newer; a reloaded server's clock counts the collected ids too, Rga.markCollected) plus the elements it made
+      // since, which its capacity bounds; so the server refuses an insert ending
       // more than its own capacity past its clock. Then each insert moves the clock at most a capacity on, an insert
       // makes at least one element, and the server holds at most a capacity of them: the clock stays below
       // capacity squared (2^46), and can't run out before the document is full.

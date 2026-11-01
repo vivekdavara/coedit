@@ -257,7 +257,7 @@ describe('Rga.collect', () => {
     assert.equal(rga.pending, 0, 'the collected id is not waited for');
   });
 
-  test('markCollected refuses ids held, and moves the clock past its own', () => {
+  test('markCollected refuses ids held, and moves the clock past every id, its own or not', () => {
     const rga = new Rga('s');
     rga.edit(0, 0, 'a');
     assert.throws(() => {
@@ -267,5 +267,8 @@ describe('Rga.collect', () => {
     assert.equal(rga.clock, 7);
     const [op] = rga.edit(1, 0, 'b') as [Op & { type: 'insert' }];
     assert.equal(op.id.counter, 8);
+    // Another replica's too (release review, round 3): the clock is what receiving those inserts made it.
+    rga.markCollected([{ replica: 't', counter: 20, length: 2 }]);
+    assert.equal(rga.clock, 21);
   });
 });

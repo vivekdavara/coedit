@@ -826,7 +826,10 @@ export class Rga {
 
   /**
    * Records ids as collected (a replica rebuilt from a snapshot: its collected spans). Throws RangeError if this
-   * replica holds any of them. This replica's own ids move its clock past them, so it never makes them again.
+   * replica holds any of them. Every id moves the clock past it, as receiving its insert did: this replica's own, so
+   * it never makes them again, and everyone's, so a reloaded server's clock is what it was before (it bounds the
+   * counters it accepts by it, and a client that saw a collected element's counter would otherwise be refused for
+   * good: release review, round 3).
    */
   markCollected(spans: readonly Span[]): void {
     for (const span of spans) {
@@ -837,11 +840,7 @@ export class Rga {
       }
     }
     this.#collected.addSpans(spans);
-    for (const span of spans) {
-      if (span.replica === this.replica) {
-        this.#clock = Math.max(this.#clock, span.counter + span.length - 1);
-      }
-    }
+    for (const span of spans) this.#clock = Math.max(this.#clock, span.counter + span.length - 1);
   }
 
   /** Whether `id` is a placed element that's deleted (a tombstone here). */
