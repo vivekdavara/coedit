@@ -10,7 +10,7 @@ import { DEFAULT_HOST, DEFAULT_PORT } from '@coedit/server';
 import { npmCommands, problems, repoPaths, type Manifest } from './docs.ts';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const DOCS = ['README.md', 'DESIGN.md', 'WALKTHROUGH.md'];
+const DOCS = ['README.md', 'DESIGN.md', 'WALKTHROUGH.md', 'CHANGELOG.md'];
 const read = (path: string) => readFileSync(`${ROOT}${path}`, 'utf8');
 
 const root = JSON.parse(read('package.json')) as Manifest & { workspaces: string[] };
