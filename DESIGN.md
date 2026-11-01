@@ -540,7 +540,7 @@ at one spot at once (each run whole), one offline while both edit and back, and 
 | 2   | the CRDT (ids, Lamport clock, insert, delete, tombstones, pending operations); convergence properties                                   |
 | 3   | the sync server and React client; presence; offline buffering and reconnect                                                             |
 | 4   | persistence (snapshots + op log); tombstone GC (the leaf rule); Playwright e2e with two browsers; ops/sec, document growth              |
-| 5   | README with results, WALKTHROUGH.md, v1.0.0                                                                                             |
+| 5   | a release review by a separate agent; README with results at v1.0.0, WALKTHROUGH.md, CHANGELOG.md; v1.0.0                               |
 
 ## Decisions
 
@@ -552,8 +552,12 @@ at one spot at once (each run whole), one offline while both edit and back, and 
 - **Written by hand, not Yjs or Automerge.** Being hand-written is the point of the project.
 - **JSON text messages.** Easy to read in a browser's network panel and to test; a binary encoding would be smaller.
   Day 4 measured the cost on disk: a snapshot takes about 40 bytes per visible character and the log about 50 in the
-  synthetic session, mostly each operation's JSON around a few characters. Small next to the heap (about 186 bytes
-  an element); not changed.
+  synthetic session, mostly each operation's JSON around a few characters. Small next to the heap (about 229 bytes
+  an element at v1.0.0); not changed.
+- **Released without group commit.** Each message is made durable by its own fsync before it is relayed: about 340
+  messages a second for the whole server on this Mac, and about 3 ms on every acknowledgement. Group commit would
+  raise the first and not the second, and it changes the one path where a bug loses acknowledged edits; at people's
+  typing speeds the cap isn't what limits a document, so it's the first thing to build next, measured against 340.
 - **Node's own test runner and type stripping.** Node runs the TypeScript directly (types are erased, nothing is
   compiled), so the server and the tests need no build step; `tsc` only checks types. That rules out TypeScript-only
   runtime syntax (enums, parameter properties), which `erasableSyntaxOnly` enforces.
