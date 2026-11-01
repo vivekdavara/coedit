@@ -174,6 +174,20 @@ describe('Rga.collect', () => {
     assert.equal(rga.sizes().elements, 1);
   });
 
+  test('takes an origin at a later collection once an earlier one took the run naming it (release review)', () => {
+    // The run counts of the elements left must follow what each collection takes: a reload recounts them from the
+    // snapshot, so a replica that didn't would collect less than its own reload (a mutant found no test noticing).
+    const rga = new Rga('s');
+    rga.edit(0, 0, 'ab'); // 1-2@s
+    rga.edit(2, 0, 'XY'); // 3-4@s after b: b is not a leaf while XY's run names it
+    rga.apply({ type: 'delete', spans: [{ replica: 's', counter: 3, length: 2 }] }, 2); // X Y
+    rga.apply({ type: 'delete', spans: [{ replica: 's', counter: 2, length: 1 }] }, 5); // b, later
+    assert.equal(rga.collect(3), 2, 'XY, not b: its delete is too recent');
+    assert.equal(rga.collect(5), 1, 'b, now that no run names it');
+    assert.equal(rga.text(), 'a');
+    assert.match(rga.state(), /collected 2\+3@s$/);
+  });
+
   test('keeps a tombstone a later delete named until that delete is old enough too', () => {
     const rga = new Rga('s');
     rga.edit(0, 0, 'ab');
