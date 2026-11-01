@@ -440,6 +440,39 @@ Measured on an Apple M3 (macOS 26.6.2, Node 23.11.0, on AC, awake throughout). A
 - `review-d4-*.test.ts` (day 4): the review's findings, each of which failed before its fix.
 - `review1-*.test.ts`, `review2-*.test.ts`: the reviews' findings, each of which failed before its fix.
 
+## Review of day 5 (the release review)
+
+**Round 1.** One review agent, in its own worktree at `ec83d37` (the release candidate), asked first about the
+tombstone collection and the three fixes of its only review round, then the client after a snapshot, the server's
+snapshot path and the docs' claims; each finding written as a failing test (the `review-d5-` files); about 17
+minutes. It reproduced three defects:
+
+1. **A snapshot whose directory sync failed after its rename made the document unloadable.** The sync after the
+   rename was outside any try, so when it threw (EMFILE, EIO) the collecting snapshot was on disk but the write
+   counted as failed and the hub's replica kept the tombstones; an insert after one was then accepted, and the next
+   load refused that entry. Now the store throws `UnsyncedSnapshotError` (pruning nothing), the hub fails as for a
+   failed append (members reconnect, the next join loads what's on disk), and every open syncs the directory
+   (`4675d7d`).
+2. **Two unsent inserts after one collected element came back swapped** ("pXY" where a server that never collects
+   shows "pYX"): re-anchoring the second scanned past the first, already placed.
+3. **Re-anchoring could cross visible text when counters tie** ("psXe" for "pseX"): the fallback looked for an origin
+   with a smaller counter, but RGA compares whole ids. Under an insert's own id there may be no origin that puts it
+   in the right place. Both fixed by re-issuing unsent inserts under new ids, after the element before them in a
+   scratch replica's never-collecting order (`2847a8b`).
+
+Its 3,000-seed fuzzer of re-anchoring found 344 seeds that diverged from a never-collecting server (all finding 2;
+its replica names all sorted after the client's, so it couldn't reach finding 3). On the fix, the same fuzzer at
+3,000 seeds each with the others named `x,y,z`, `a,n,z` and `a,b,c`: 0 divergent, 0 unconverged, 0 failed (the old
+code: 344 and 375 divergent for the first two); it is now `reissue.test.ts`. Of its 12 mutants, 3 survived: two were
+the counter-tie case (now tested), and removing the decrement of an origin's child-run count in `collect()`, which
+made memory collect less than its own reload; now tested (`2257a9d`, the mutant re-run: it fails). Docs it found
+stale: DESIGN "Tombstones" and "Persistence", the WALKTHROUGH's resync answer and the README's limitation, all
+rewritten (`ab30dde`). Not fixed: a remote cursor at a collected element stays hidden until its owner moves it (in
+Limitations).
+
+Also found on day 5, by the commit check: `signal-order.test.ts` read the probe's stderr line as if it always arrived
+before the "listening" line on stdout; they are two pipes, and under load it failed (`70b6bb1`).
+
 ## Review of day 4
 
 One review agent, in its own worktree at `34380fd` (persistence, the snapshot path and the e2e tests; the blocks came
