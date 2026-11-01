@@ -435,8 +435,10 @@ Measured on an Apple M3 (macOS 26.6.2, Node 23.11.0, on AC, awake throughout). A
 - `packages/client/test/reissue.test.ts` (day 5, from the release review): 1,000 sessions each with the other
   replicas' names sorting after the client's and on both sides of it: a client offline types after text that others
   then delete, the server collects, the client rebuilds and re-issues, and must end with the text of a server that
-  never collects (with a census of what was collected and re-issued); renamed deletes, text typed inside re-issued
-  text, the renamed cursor. `review-d5-*.test.ts`: the release review's findings.
+  never collects (with a census of what was collected and re-issued); 1,000 more with text typed after the snapshot,
+  where only convergence is asserted and the count of other orders is reported; renamed deletes, text typed inside
+  re-issued text, the renamed cursor, a snapshot missing an origin. `review-d5-*.test.ts`, `review-d5r2-*.test.ts`:
+  the release review's findings.
 - `review-d4-*.test.ts` (day 4): the review's findings, each of which failed before its fix.
 - `review1-*.test.ts`, `review2-*.test.ts`: the reviews' findings, each of which failed before its fix.
 
@@ -469,6 +471,26 @@ made memory collect less than its own reload; now tested (`2257a9d`, the mutant 
 stale: DESIGN "Tombstones" and "Persistence", the WALKTHROUGH's resync answer and the README's limitation, all
 rewritten (`ab30dde`). Not fixed: a remote cursor at a collected element stays hidden until its owner moves it (in
 Limitations).
+
+**Round 2.** One agent on the two fixes (`4675d7d`, `2847a8b`), asked what each broke; about 14 minutes. The server
+fix held (everything after the rename is caught or becomes `UnsyncedSnapshotError`; the sync at open is cheap). In
+the re-issue it found two problems, each as a failing test (`review-d5r2-`):
+
+1. **Re-issued ids started above the client's clock**, which counts the abandoned ids, so a long unsent paste could
+   end about twice its length past the server's clock and be refused for good (with capacity 40, a 25-character paste
+   ended at 52 against a clock of 2; at the default capacity it takes about 4.2 million code points). They now start
+   above the highest counter the snapshot holds, reusing counters no one saw (`e57064c`).
+2. **Text logged after the snapshot at the same spot can land on the other side of a re-issued insert**: the two are
+   concurrent, RGA orders them by id, and the deleted element a never-collecting server ordered against is gone. Not
+   fixable without keeping it; the claim is narrowed (code, DESIGN, Limitations), and `reissue.test.ts` now runs
+   sessions with text typed after the snapshot: all converge, 55 of 1,000 end in another order than never collecting.
+
+It traced "none of the re-issued inserts was ever logged" through every path it found (the snapshot is the hub's
+state at `hello`, logged outbox operations are a prefix, `resync` only answers live operations) without a
+counterexample. Of its 18 mutants of the new code, one survived (the scratch replica's missing-origin guard), now
+tested. On the final code the round-1 fuzzer, 3,000 seeds each for three sets of names: 0 divergent, 0 unconverged,
+0 failed. Left as they are: a `resync` and a failed snapshot sync in one message give the client `server-error` (one
+more round trip); a client's own cursor at a collected element stays hidden until it moves.
 
 Also found on day 5, by the commit check: `signal-order.test.ts` read the probe's stderr line as if it always arrived
 before the "listening" line on stdout; they are two pipes, and under load it failed (`70b6bb1`).
@@ -733,8 +755,9 @@ the later days closed is gone from this one.
   rebuild from a snapshot.
 - **A client resynced or far behind rebuilds its whole replica** from a snapshot (all of the document, about 40 bytes
   a visible character), and its unsent inserts from the first whose origin was collected on are re-issued under new
-  ids (their text and place are kept). A remote cursor sitting at a collected element isn't shown until its owner
-  moves it.
+  ids: their text is kept, and so is their place among the text the snapshot holds, but text typed at the same spot
+  and logged after the snapshot may end on the other side of them (55 of 1,000 test sessions; every replica agrees).
+  A cursor sitting at a collected element isn't shown until its owner moves it.
 - **Positions are found in blocks, not a tree**: about n / 512 + 512 steps an operation, flat at the sizes measured,
   but still linear in the number of blocks.
 - **A document holds at most 8,388,607 elements** (2^23 - 1), tombstones and waiting operations included, because a

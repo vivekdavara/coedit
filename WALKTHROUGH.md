@@ -510,13 +510,22 @@ snapshot. One that names a collected element anyway (made before it saw the dele
 rejoins asking for everything, rebuilds from a snapshot, and re-issues its unsent inserts (next question).
 
 **Where does an unsent insert go when the text it was typed after is gone?** Where it would have gone if nothing had
-been collected. The client builds a scratch replica of the snapshot plus the collected elements its inserts lead back
-to (its old replica still has them as tombstones) plus its unsent inserts, and reads off the order. Then, from the
-first insert whose origin was collected on, it re-issues each one under a new id above its clock, after the nearest
-element before it in that order that the new replica holds. A new id is larger than everything, so RGA puts it right
-after that origin: the order comes out exactly. It can change the ids because none of those inserts was ever logged:
-the server refuses an insert naming a collected element, and a client sends in order. Later deletes and its own
-cursor are renamed to match. (`packages/client/src/sync.ts`, `placeUnsent`; `reissue.test.ts`.)
+been collected, among the text the snapshot holds. The client builds a scratch replica of the snapshot plus the
+collected elements its inserts lead back to (its old replica still has them as tombstones) plus its unsent inserts,
+and reads off the order. Then, from the first insert whose origin was collected on, it re-issues each one under a new
+id above the highest counter the snapshot holds, after the nearest element before it in that order that the new
+replica holds. A new id is larger than everything there, so RGA puts it right after that origin: the order comes out
+exactly. It can change the ids because none of those inserts was ever logged: the server refuses an insert naming a
+collected element, and a client sends in order. Later deletes and its own cursor are renamed to match.
+(`packages/client/src/sync.ts`, `placeUnsent`; `reissue.test.ts`.)
+
+**And text someone types at the same spot while that happens?** If it's logged after the snapshot, it's concurrent
+with the re-issued insert, and RGA orders the two by id; without collection it would have been ordered against the
+deleted element, which no longer exists anywhere. So the order can differ from never collecting (55 of 1,000 test
+sessions with three edits typed after the snapshot), but every replica agrees, and each run stays whole. Fixing it
+would mean keeping the element, which is what collection removes. Round 2 of the release review found this, and that
+starting the new ids above the client's clock (which counts the abandoned ids) could push a long paste past the
+server's limit on how far ahead a counter may be; they now start above the snapshot's highest counter.
 
 **Why not keep the ids and pick a better origin?** That was the first version, and the release review broke it twice:
 two inserts after one collected element came back swapped, because the second search passed the first; and when no

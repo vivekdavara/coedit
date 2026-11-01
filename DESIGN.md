@@ -515,8 +515,9 @@ the ones it can prove nothing will need, by the **leaf rule** (built after day 4
 - **A client that names one anyway** (it made the operation before it saw the delete, and sends it after the
   collection: an offline client, mostly) is refused with `resync`, the server changing nothing. Its next hello asks
   for everything, and it rebuilds from a snapshot ("The outbox after a snapshot"). From the first unsent insert whose
-  origin was collected on, every unsent insert is **re-issued**: a new id above the clock, and as origin the nearest
-  element before it, in the order a server that never collected would give, that the new replica holds by then.
+  origin was collected on, every unsent insert is **re-issued**: a new id above the highest counter the new replica
+  holds (or has collected of this client's), and as origin the nearest element before it, in the order a server that
+  never collected would give, that the new replica holds by then.
   That order comes from a scratch replica: the snapshot, the collected elements the origins lead back to (from the
   old replica, which never collects), and the unsent inserts under their own ids. RGA's order depends only on which
   elements exist, and collected leaves can be removed from the origin tree without reordering the rest, so the
@@ -524,8 +525,14 @@ the ones it can prove nothing will need, by the **leaf rule** (built after day 4
   new replica, so the insert lands right after its origin, which reproduces that order exactly; later deletes and the
   client's own cursor are renamed. None of these inserts was ever logged (the server refuses an insert naming a
   collected element, and a client sends in order: everything after a refused insert went unlogged too), so no one
-  has seen the old ids. The first version re-anchored each insert in place, under its own id, and the release review
-  found two inserts after one collected element swapped, and an insert crossing visible text when counters tie.
+  has seen the old ids, and the new ones may reuse their counters: starting above the client's clock instead (which
+  counts the old ids) could end a long paste twice its length past the server's clock, past what the server accepts.
+  The first version re-anchored each insert in place, under its own id, and the release review found two inserts
+  after one collected element swapped, and an insert crossing visible text when counters tie. **What it doesn't
+  reproduce**: text logged after the snapshot, typed at the same spot, is concurrent with the re-issued insert, and
+  RGA orders the two by id, where a never-collecting server ordered that text against the collected element, which
+  is gone. Every replica agrees on the result; in `reissue.test.ts`'s sessions with three edits typed after the
+  snapshot, 55 of 1,000 ended in another order than never collecting.
 - **Kept.** The collected ids are kept as ranges (`IdRanges`): to refuse operations naming them, to skip them in
   deletes, and to tell a client rebuilding from a snapshot that an outbox insert under one was logged. They go into
   the snapshot file after its operations and to clients in `collected` messages before a snapshot's parts.
