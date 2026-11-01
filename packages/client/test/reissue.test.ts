@@ -83,7 +83,7 @@ interface Census {
 }
 
 /** One session: live editing by `me` and three others, then `me` offline while the others mostly delete. */
-function session(seed: number, others: readonly string[], census: Census): void {
+function session(seed: number, others: readonly string[], census: Census, late = 0): void {
   const r = rng(seed);
   const pick = <T>(a: readonly T[]) => a[Math.floor(r() * a.length)] as T;
   const reps = new Map(others.map((n) => [n, { rga: new Rga(n), at: 0 }]));
@@ -158,17 +158,35 @@ function session(seed: number, others: readonly string[], census: Census): void 
   log.forEach((op, i) => server.apply(op, i + 1));
   const collected = server.collect(log.length);
   census.collected += collected;
+  const snapshotAt = server.snapshot();
+  // Text one of the others types after the snapshot is taken: logged after it, it reaches the client after the
+  // rebuild. A writer that has applied the whole log (the others above may have skipped entries, and a real server
+  // would refuse an edit naming a collected element with resync).
+  const after: Op[] = [];
+  if (late > 0) {
+    const writer = new Rga(pick(others));
+    for (const op of log) writer.apply(op);
+    for (let s = 0; s < late; s++) {
+      for (const op of randomEdit(writer)) {
+        log.push(op);
+        after.push(op);
+        server.apply(op, log.length);
+      }
+    }
+  }
+  const seq = log.length - after.length;
   const never = new Rga('never');
   for (const op of [...log, ...meant]) never.apply(op);
 
   sync.start();
   latest().open();
   latest().take();
-  latest().receive({ type: 'welcome', protocol: 1, doc: 'd', seq: log.length });
+  latest().receive({ type: 'welcome', protocol: 1, doc: 'd', seq });
   if (collected > 0) latest().receive({ type: 'collected', spans: server.collectedSpans() });
-  latest().receive({ type: 'snapshot', seq: log.length, ops: server.snapshot(), last: true });
+  latest().receive({ type: 'snapshot', seq, ops: snapshotAt, last: true });
   assert.equal(sync.status, 'online', `seed ${seed}: ${sync.detail}`);
   const sent = opsOf(latest().take());
+  if (after.length > 0) latest().receive({ type: 'ops', from: seq + 1, ops: after });
   const original = new Set(meant.map((op) => JSON.stringify(op)));
   const reissued = sent.filter(
     (op) => op.type === 'insert' && !original.has(JSON.stringify(op)),
@@ -206,6 +224,25 @@ describe('re-issuing unsent inserts after a collecting snapshot', () => {
       assert.ok(census.severalReissued > 200, `${census.severalReissued} re-issued several`);
     });
   }
+
+  test('converges with text typed after the snapshot, whose order next to re-issued text may differ', (t) => {
+    // Text logged after the snapshot is concurrent with the re-issued inserts, and where it typed at the same spot
+    // RGA orders the two by id; the collected element it was ordered against without collection is gone (release
+    // review, round 2). So only convergence is asserted, and how often the order differed is reported.
+    const census: Census = {
+      collected: 0,
+      reissued: 0,
+      reissuedSessions: 0,
+      severalReissued: 0,
+      diverged: [],
+    };
+    for (let seed = 1; seed <= 1000; seed++) session(seed, ['a', 'n', 'z'], census, 3);
+    assert.ok(census.reissuedSessions > 400, `${census.reissuedSessions} sessions re-issued`);
+    t.diagnostic(
+      `${census.reissuedSessions} of 1,000 sessions re-issued; ${census.diverged.length} ended in another order ` +
+        'than never collecting (all converged)',
+    );
+  });
 
   const insert = (
     counter: number,
@@ -254,10 +291,11 @@ describe('re-issuing unsent inserts after a collecting snapshot', () => {
     sync.edit(2, 0, 'XYZ'); // 3@me..5@me after t: "ptXYZ"
     sync.edit(2, 1, ''); // deletes X (3@me): "ptYZ"
     const sent = opsOf(rejoin());
-    // XYZ re-issued as 6@me..8@me after p; the delete names 6@me, not 3@me (which no one has).
+    // XYZ re-issued as 2@me..4@me after p (the counters go on from the snapshot's highest, 1@x: no one has seen
+    // 3@me..5@me, so reusing them is safe); the delete names 2@me, not 3@me, which is now Y.
     assert.deepEqual(sent, [
-      insert(6, 'me', [1, 'x'], 'XYZ'),
-      { type: 'delete', spans: [{ replica: 'me', counter: 6, length: 1 }] },
+      insert(2, 'me', [1, 'x'], 'XYZ'),
+      { type: 'delete', spans: [{ replica: 'me', counter: 2, length: 1 }] },
     ]);
     for (const op of sent) server.apply(op, 4);
     assert.equal(server.text(), 'pYZ');
@@ -281,11 +319,46 @@ describe('re-issuing unsent inserts after a collecting snapshot', () => {
     sync.select({ anchor: 3, head: 3 }); // after X
     const messages = rejoin();
     const presence = messages.filter((m) => m.type === 'presence');
+    // X re-issued as 2@me (above 1@x, the snapshot's highest), and the cursor after it with it.
     assert.deepEqual(presence, [
       {
         type: 'presence',
-        cursor: { anchor: { replica: 'me', counter: 4 }, head: { replica: 'me', counter: 4 } },
+        cursor: { anchor: { replica: 'me', counter: 2 }, head: { replica: 'me', counter: 2 } },
       },
     ]);
+  });
+  test('an unsent insert whose origin the snapshot lacks, uncollected, stops the client (a server bug)', () => {
+    // x typed "p", then "c" and "d" each after p. me, offline, typed X after c and Y after d. c is collected; the
+    // snapshot (wrongly) leaves out d without collecting it. Re-issuing starts at X, and Y has nowhere to go.
+    const log: Op[] = [
+      insert(1, 'x', null, 'p'),
+      insert(2, 'x', [1, 'x'], 'c'),
+      insert(3, 'x', [1, 'x'], 'd'),
+      { type: 'delete', spans: [{ replica: 'x', counter: 2, length: 1 }] },
+    ];
+    const server = new Rga('server');
+    log.forEach((op, i) => server.apply(op, i + 1));
+    assert.equal(server.collect(4), 1);
+    const { sync, latest } = client();
+    sync.start();
+    latest().open();
+    latest().take();
+    latest().receive({ type: 'welcome', protocol: 1, doc: 'd', seq: 3 });
+    latest().receive({ type: 'ops', from: 1, ops: log.slice(0, 3) });
+    sync.stop();
+    assert.equal(sync.rga.text(), 'pdc');
+    sync.edit(3, 0, 'X'); // after c
+    sync.edit(2, 0, 'Y'); // after d: "pdYcX"
+    sync.start();
+    latest().open();
+    latest().take();
+    latest().receive({ type: 'welcome', protocol: 1, doc: 'd', seq: 4 });
+    latest().receive({ type: 'collected', spans: server.collectedSpans() });
+    const withoutD = server
+      .snapshot()
+      .filter((op) => !(op.type === 'insert' && op.id.counter === 3));
+    latest().receive({ type: 'snapshot', seq: 4, ops: withoutD, last: true });
+    assert.equal(sync.status, 'failed');
+    assert.match(sync.detail, /neither the snapshot nor the outbox/);
   });
 });

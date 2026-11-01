@@ -809,7 +809,7 @@ describe('collected ids (day 4, DESIGN.md "Tombstones")', () => {
       .take()
       .flatMap((m) => (m.type === 'ops' ? m.ops : []));
     // Never collecting, b's children are Q (5@y) then c (3@x): "a b Q c Z". So Z goes right after Q, under a new id
-    // larger than every id here (6@me: the clock is at 5), which RGA puts right after its origin.
+    // larger than every id here (6@me: the snapshot's highest is 5@y), which RGA puts right after its origin.
     assert.deepEqual(sent, [insert(6, 'me', [5, 'y'], 'Z')]);
     assert.equal(client.rga.text(), 'abQZ');
     assert.equal(client.unacknowledged, 1);
@@ -883,8 +883,9 @@ describe('collected ids (day 4, DESIGN.md "Tombstones")', () => {
     const sent = latest()
       .take()
       .flatMap((m) => (m.type === 'ops' ? m.ops : []));
-    // Re-issued as 5@me (the clock was at 4) right after b, where it was: "a b c !" with c gone.
-    assert.deepEqual(sent, [insert(5, 'me', [2, 'x'], '!')]);
+    // Re-issued right after b, where it was ("a b c !" with c gone), as 3@me: above the highest counter the snapshot
+    // holds (2@x; the collected 3@x is another replica's, which no id of this one can equal).
+    assert.deepEqual(sent, [insert(3, 'me', [2, 'x'], '!')]);
     // And the hello after that asks from where it is again.
     latest().drop();
     await nextTick();

@@ -468,21 +468,25 @@ export class SyncClient {
    * whose origin was collected on, every unsent insert is re-issued under a new id, right after the element before
    * it in the order a server that never collected would give (placeUnsent), and later deletes and this client's
    * cursor are renamed to match; none of them was ever logged (the server refuses an insert naming a collected
-   * element, and a client sends in order), so no one has seen the old ids. The text, and its place among the text
-   * that remains, are what they would have been without collection. The editor gets the difference between the two
-   * texts.
+   * element, and a client sends in order), so no one has seen the old ids, and the new ones may reuse their counters.
+   * The text, and its place among the text the snapshot holds, are what they would have been without collection.
+   * Text logged after the snapshot at the same spot is concurrent with the re-issued insert and may land on its
+   * other side (release review, round 2): RGA puts the newer first, and every replica agrees. The editor gets the
+   * difference between the two texts.
    */
   #rebuild(fresh: Rga, seq: number): void {
     const old = this.#rga;
     // Set at the first unsent insert whose origin was collected: from it on, every unsent insert is re-issued.
     let place: Placement | null = null;
     const renamed = new Map<string, Id>();
+    let counter = 0;
     const outbox: Outgoing[] = [];
     for (let k = 0; k < this.#outbox.length; k++) {
       const { op, text } = this.#outbox[k] as Outgoing;
       let next: Op = op;
       if (op.type === 'insert') {
-        if (fresh.has(op.id) || fresh.isCollected(op.id)) continue;
+        // (Not once re-issuing: nothing from there on was logged, and a new id may reuse an old one's counter.)
+        if (place === null && (fresh.has(op.id) || fresh.isCollected(op.id))) continue;
         if (place === null && op.origin !== null && !fresh.has(op.origin)) {
           if (!fresh.isCollected(op.origin)) {
             this.#fail(`the snapshot lacks ${formatId(op.origin)}, which an unsent edit is after`);
@@ -494,27 +498,33 @@ export class SyncClient {
             return;
           }
           place = placed;
+          counter = placed.above + 1;
         }
         if (place !== null) {
           // Re-issued under a new id, larger than every id in the new replica, so it lands right after its new origin:
           // the nearest element before it, in the never-collecting order, that the new replica holds by now (release
           // review: anchoring at a collected origin's position by RGA's scan reordered two inserts after it, and
           // falling back to a smaller counter crossed visible text). No one has seen its old id: it was never logged.
+          // The counters go on from what the new replica held, not from this client's clock, which counts the old
+          // ids too: from there an unsent paste re-issued could end twice its length past the server's clock, which
+          // the server refuses for good (release review, round 2).
           const i = place.index.get(idKey(op.id)) as number;
           let origin: Id | null = null;
           for (let j = i - 1; j >= 0 && origin === null; j--) {
             const id = place.sequence[j] as Id;
-            origin = renamed.get(idKey(id)) ?? (fresh.has(id) ? id : null);
+            const key = idKey(id);
+            // An unsent insert not re-issued yet isn't there yet, even if a new id now shares its old one's counter.
+            if (place.unsent.has(key)) continue;
+            origin = renamed.get(key) ?? (fresh.has(id) ? id : null);
           }
-          const counter = fresh.clock + 1;
           const length = Array.from(op.text).length;
           for (let c = 0; c < length; c++) {
-            renamed.set(idKey({ replica: op.id.replica, counter: op.id.counter + c }), {
-              replica: op.id.replica,
-              counter: counter + c,
-            });
+            const key = idKey({ replica: op.id.replica, counter: op.id.counter + c });
+            place.unsent.delete(key);
+            renamed.set(key, { replica: op.id.replica, counter: counter + c });
           }
           next = { ...op, id: { replica: op.id.replica, counter }, origin };
+          counter += length;
         }
       } else {
         let done = true;
@@ -679,6 +689,10 @@ interface Placement {
   readonly sequence: readonly Id[];
   /** Each id's index in `sequence`. */
   readonly index: ReadonlyMap<string, number>;
+  /** The unsent inserts' element ids (#rebuild takes each out as it re-issues it). */
+  readonly unsent: Set<string>;
+  /** The highest counter the new replica holds, or has collected of this client's: new ids go above it. */
+  readonly above: number;
 }
 
 /**
@@ -692,8 +706,15 @@ interface Placement {
 function placeUnsent(old: Rga, fresh: Rga, unsent: readonly Outgoing[]): Placement | string {
   const scratch = new Rga(fresh.replica);
   const restore = new Map<string, Op>();
+  const unsentIds = new Set<string>();
+  let above = 0;
   try {
     for (const op of fresh.snapshot()) scratch.apply(op);
+    // Its clock started at 0, so it is now the highest counter of the new replica's elements.
+    above = scratch.clock;
+    for (const span of fresh.collectedSpans()) {
+      if (span.replica === fresh.replica) above = Math.max(above, span.counter + span.length - 1);
+    }
     for (const { op } of unsent) {
       if (op.type !== 'insert') continue;
       let base = op.origin;
@@ -708,12 +729,23 @@ function placeUnsent(old: Rga, fresh: Rga, unsent: readonly Outgoing[]): Placeme
     }
     // In any order: an insert waits for its origin.
     for (const op of restore.values()) scratch.apply(op);
-    for (const { op } of unsent) if (op.type === 'insert') scratch.apply(op);
+    for (const { op } of unsent) {
+      if (op.type !== 'insert') continue;
+      scratch.apply(op);
+      const length = Array.from(op.text).length;
+      for (let c = 0; c < length; c++)
+        unsentIds.add(idKey({ replica: op.id.replica, counter: op.id.counter + c }));
+    }
   } catch (error) {
     return `an unsent edit can't be placed against the snapshot: ${(error as Error).message}`;
   }
   if (scratch.pending > 0)
     return "an unsent edit's origin is in neither the snapshot nor the outbox";
   const sequence = scratch.sequence();
-  return { sequence, index: new Map(sequence.map((id, i) => [idKey(id), i])) };
+  return {
+    sequence,
+    index: new Map(sequence.map((id, i) => [idKey(id), i])),
+    unsent: unsentIds,
+    above,
+  };
 }
