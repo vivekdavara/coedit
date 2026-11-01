@@ -870,40 +870,7 @@ export class Rga {
     return { replica: e.id.replica, counter: e.id.counter - 1 };
   }
 
-  /**
-   * Where an insert of `id` after `origin` would go, by RGA's rule, without inserting it: the id of the element it
-   * would come right after (`origin` itself, or the last larger id the scan passes), or null for the start. `origin`
-   * must be placed here. A client re-anchoring an insert whose origin was collected uses it to find where that origin
-   * would be (DESIGN.md "Tombstones").
-   */
-  placementOrigin(origin: Id | null, id: Id): Id | null {
-    let b = 0;
-    let i = 0;
-    let before: Id | null = origin;
-    if (origin !== null) {
-      const e = this.#known.get(origin);
-      if (e?.run.placed !== true) throw new RangeError(`${formatId(origin)} isn't placed here`);
-      const at = this.#locate(e);
-      b = at.b;
-      i = at.i + 1;
-    }
-    for (;;) {
-      const block = this.#blocks[b];
-      if (block === undefined) break;
-      const e = block.elements[i];
-      if (e === undefined) {
-        b++;
-        i = 0;
-        continue;
-      }
-      if (compareIds(e.id, id) < 0) break;
-      before = e.id;
-      i++;
-    }
-    return before === null ? null : { replica: before.replica, counter: before.counter };
-  }
-
-  /** Every placed element's id in sequence order, tombstones included (for a client re-anchoring its edits). */
+  /** Every placed element's id in sequence order, tombstones included (for a client re-issuing its edits). */
   sequence(): Id[] {
     const ids: Id[] = [];
     for (const block of this.#blocks) {

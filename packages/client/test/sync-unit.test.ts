@@ -793,7 +793,7 @@ describe('collected ids (day 4, DESIGN.md "Tombstones")', () => {
     assert.deepEqual(latest().take(), []);
   });
 
-  test('re-anchor an unsent insert whose origin was collected, after an element with a smaller id', () => {
+  test('re-issue an unsent insert whose origin was collected, after where it would be without collection', () => {
     const { client, latest } = offline();
     client.edit(3, 0, 'Z'); // 4@me after 3@x: unsent; meanwhile someone backspaced c (3@x), which was collected
     client.start();
@@ -808,13 +808,14 @@ describe('collected ids (day 4, DESIGN.md "Tombstones")', () => {
     const sent = latest()
       .take()
       .flatMap((m) => (m.type === 'ops' ? m.ops : []));
-    // After b (2@x), the nearest element before c with an id smaller than 4@me.
-    assert.deepEqual(sent, [insert(4, 'me', [2, 'x'], 'Z')]);
+    // Never collecting, b's children are Q (5@y) then c (3@x): "a b Q c Z". So Z goes right after Q, under a new id
+    // larger than every id here (6@me: the clock is at 5), which RGA puts right after its origin.
+    assert.deepEqual(sent, [insert(6, 'me', [5, 'y'], 'Z')]);
     assert.equal(client.rga.text(), 'abQZ');
     assert.equal(client.unacknowledged, 1);
   });
 
-  test('re-anchor through a chain of collected origins, by where each would be', () => {
+  test('re-issue through a chain of collected origins, by where each would be', () => {
     const { client, latest } = offline();
     client.edit(3, 0, 'Z'); // 4@me after c; meanwhile c then b were backspaced (c, then b, leaves) and collected
     client.start();
@@ -829,9 +830,8 @@ describe('collected ids (day 4, DESIGN.md "Tombstones")', () => {
     const sent = latest()
       .take()
       .flatMap((m) => (m.type === 'ops' ? m.ops : []));
-    // Where b would be is after Q (a larger id); Q's counter (5) isn't smaller than Z's (4), so a is the origin, and
-    // RGA then skips Q (larger) and puts Z after it, where it was meant to be.
-    assert.deepEqual(sent, [insert(4, 'me', [1, 'x'], 'Z')]);
+    // Never collecting: "a Q b c Z" (a's children Q, then b). b and c are gone, so Z goes right after Q.
+    assert.deepEqual(sent, [insert(6, 'me', [5, 'y'], 'Z')]);
     assert.equal(client.rga.text(), 'aQZ');
   });
 
@@ -883,7 +883,8 @@ describe('collected ids (day 4, DESIGN.md "Tombstones")', () => {
     const sent = latest()
       .take()
       .flatMap((m) => (m.type === 'ops' ? m.ops : []));
-    assert.deepEqual(sent, [insert(4, 'me', [2, 'x'], '!')]);
+    // Re-issued as 5@me (the clock was at 4) right after b, where it was: "a b c !" with c gone.
+    assert.deepEqual(sent, [insert(5, 'me', [2, 'x'], '!')]);
     // And the hello after that asks from where it is again.
     latest().drop();
     await nextTick();

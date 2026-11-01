@@ -464,65 +464,65 @@ export class SyncClient {
    * server had logged by `seq`, its collected ids included, so: an insert whose ids it holds or collected was logged
    * (its echo was in the entries the snapshot replaces) and leaves the outbox; a delete all of whose ids are its
    * tombstones or collected has its effect there already and leaves too. The rest were never logged: applied to the
-   * new replica and kept, a delete without the collected ids it named (they're deleted), and an insert whose origin
-   * was collected re-anchored where that origin would be in the new replica by RGA's rule (or, if the element there
-   * has a counter not smaller than the insert's, the nearest one before it that has, which keeps the operation valid
-   * under its own id, which no one has seen). Its text survives; its place next to deleted text may move. The editor
-   * gets the difference between the two texts.
+   * new replica and kept, a delete without the collected ids it named (they're deleted). From the first unsent insert
+   * whose origin was collected on, every unsent insert is re-issued under a new id, right after the element before
+   * it in the order a server that never collected would give (placeUnsent), and later deletes and this client's
+   * cursor are renamed to match; none of them was ever logged (the server refuses an insert naming a collected
+   * element, and a client sends in order), so no one has seen the old ids. The text, and its place among the text
+   * that remains, are what they would have been without collection. The editor gets the difference between the two
+   * texts.
    */
   #rebuild(fresh: Rga, seq: number): void {
     const old = this.#rga;
-    let order: Map<string, number> | null = null;
-    let sequence: Id[] = [];
+    // Set at the first unsent insert whose origin was collected: from it on, every unsent insert is re-issued.
+    let place: Placement | null = null;
+    const renamed = new Map<string, Id>();
     const outbox: Outgoing[] = [];
-    for (const { op, text } of this.#outbox) {
+    for (let k = 0; k < this.#outbox.length; k++) {
+      const { op, text } = this.#outbox[k] as Outgoing;
       let next: Op = op;
       if (op.type === 'insert') {
         if (fresh.has(op.id) || fresh.isCollected(op.id)) continue;
-        if (op.origin !== null && !fresh.has(op.origin)) {
+        if (place === null && op.origin !== null && !fresh.has(op.origin)) {
           if (!fresh.isCollected(op.origin)) {
             this.#fail(`the snapshot lacks ${formatId(op.origin)}, which an unsent edit is after`);
             return;
           }
-          // Where the collected origin would be in the new replica: placed by RGA's rule after its own origin
-          // (found the same way if that was collected too). Then the insert's own place after it, and the nearest
-          // element at or before that with a smaller counter, which keeps the operation valid (review of day 4's
-          // collection: the nearest element in this client's old view could be before concurrent text it never saw).
-          const chain: Id[] = [];
-          let base: Id | null = op.origin;
-          while (base !== null && !fresh.has(base)) {
-            const of: Id | null | undefined = fresh.isCollected(base)
-              ? old.originOf(base)
-              : undefined;
-            if (of === undefined) {
-              this.#fail(`the snapshot lacks ${formatId(base)}, which an unsent edit is after`);
-              return;
-            }
-            chain.push(base);
-            base = of;
+          const placed = placeUnsent(old, fresh, this.#outbox.slice(k));
+          if (typeof placed === 'string') {
+            this.#fail(placed);
+            return;
           }
-          let at: Id | null = base;
-          for (let k = chain.length - 1; k >= 0; k--)
-            at = fresh.placementOrigin(at, chain[k] as Id);
-          at = fresh.placementOrigin(at, op.id);
-          if (at !== null && at.counter >= op.id.counter) {
-            if (order === null) {
-              sequence = fresh.sequence();
-              order = new Map(sequence.map((id, i) => [idKey(id), i]));
-            }
-            let i = order.get(idKey(at)) ?? 0;
-            while (i >= 0 && (sequence[i] as Id).counter >= op.id.counter) i--;
-            at = i < 0 ? null : (sequence[i] as Id);
+          place = placed;
+        }
+        if (place !== null) {
+          // Re-issued under a new id, larger than every id in the new replica, so it lands right after its new origin:
+          // the nearest element before it, in the never-collecting order, that the new replica holds by now (release
+          // review: anchoring at a collected origin's position by RGA's scan reordered two inserts after it, and
+          // falling back to a smaller counter crossed visible text). No one has seen its old id: it was never logged.
+          const i = place.index.get(idKey(op.id)) as number;
+          let origin: Id | null = null;
+          for (let j = i - 1; j >= 0 && origin === null; j--) {
+            const id = place.sequence[j] as Id;
+            origin = renamed.get(idKey(id)) ?? (fresh.has(id) ? id : null);
           }
-          const origin = at;
-          next = { ...op, origin };
+          const counter = fresh.clock + 1;
+          const length = Array.from(op.text).length;
+          for (let c = 0; c < length; c++) {
+            renamed.set(idKey({ replica: op.id.replica, counter: op.id.counter + c }), {
+              replica: op.id.replica,
+              counter: counter + c,
+            });
+          }
+          next = { ...op, id: { replica: op.id.replica, counter }, origin };
         }
       } else {
         let done = true;
         const kept: { replica: string; counter: number; length: number }[] = [];
         for (const span of op.spans) {
           for (let i = 0; i < span.length; i++) {
-            const id = { replica: span.replica, counter: span.counter + i };
+            const named = { replica: span.replica, counter: span.counter + i };
+            const id = renamed.get(idKey(named)) ?? named;
             if (fresh.isCollected(id)) continue;
             if (!fresh.isTombstone(id)) done = false;
             const last = kept.at(-1);
@@ -557,6 +557,11 @@ export class SyncClient {
     const before = old.text();
     this.#rga = fresh;
     this.#outbox = outbox;
+    if (this.#cursor !== null && renamed.size > 0) {
+      // Its own cursor may sit in text re-issued just now; the server would refuse to show ids it never logged.
+      const rename = (id: Id | null) => (id === null ? null : (renamed.get(idKey(id)) ?? id));
+      this.#cursor = { anchor: rename(this.#cursor.anchor), head: rename(this.#cursor.head) };
+    }
     this.#seq = seq;
     this.#resync = false;
     const edit = diffText(before, fresh.text());
@@ -668,3 +673,47 @@ export function randomReplica(): string {
 export type { Change, Cursor, Id };
 
 const idKey = (id: { replica: string; counter: number }) => `${id.counter}@${id.replica}`;
+
+/** The order a server that never collected would give the new replica plus the unsent inserts (placeUnsent). */
+interface Placement {
+  readonly sequence: readonly Id[];
+  /** Each id's index in `sequence`. */
+  readonly index: ReadonlyMap<string, number>;
+}
+
+/**
+ * Where a server that never collected would put each of `unsent`'s inserts, among `fresh`'s elements: a scratch
+ * replica of `fresh`'s state, plus the collected elements the inserts' origins lead back to (from `old`, which never
+ * collects: each restored under its own id and origin, its text a placeholder, which ordering doesn't read), plus the
+ * inserts under their own ids and origins. RGA's order depends only on which elements exist, and removing collected
+ * leaves from the origin tree doesn't reorder the rest, so the scratch replica's sequence is that server's, restricted
+ * to these elements. Returns the problem instead if an origin is neither held, collected-and-known, nor unsent.
+ */
+function placeUnsent(old: Rga, fresh: Rga, unsent: readonly Outgoing[]): Placement | string {
+  const scratch = new Rga(fresh.replica);
+  const restore = new Map<string, Op>();
+  try {
+    for (const op of fresh.snapshot()) scratch.apply(op);
+    for (const { op } of unsent) {
+      if (op.type !== 'insert') continue;
+      let base = op.origin;
+      while (base !== null && !fresh.has(base) && fresh.isCollected(base)) {
+        if (restore.has(idKey(base))) break;
+        const origin = old.originOf(base);
+        if (origin === undefined)
+          return `the snapshot collected ${formatId(base)}, which this client never had`;
+        restore.set(idKey(base), { type: 'insert', id: base, origin, text: '�' });
+        base = origin;
+      }
+    }
+    // In any order: an insert waits for its origin.
+    for (const op of restore.values()) scratch.apply(op);
+    for (const { op } of unsent) if (op.type === 'insert') scratch.apply(op);
+  } catch (error) {
+    return `an unsent edit can't be placed against the snapshot: ${(error as Error).message}`;
+  }
+  if (scratch.pending > 0)
+    return "an unsent edit's origin is in neither the snapshot nor the outbox";
+  const sequence = scratch.sequence();
+  return { sequence, index: new Map(sequence.map((id, i) => [idKey(id), i])) };
+}
