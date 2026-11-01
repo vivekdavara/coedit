@@ -377,7 +377,7 @@ Measured on an Apple M3 (macOS 26.6.2, Node 23.11.0, on AC, awake throughout). A
   kept; a failed write (ENOSPC, all of it or half) closing everyone and the next load holding only what reached the
   disk; idle unloading, a refused hello not keeping a document loaded, a corrupt document refused while others are
   served. `crash.test.ts`: SIGKILL while typing, three times. `scripts.test.ts`: the storage script's output adds up.
-- `packages/client/test/sync-unit.test.ts`, "a snapshot" (day 4): merged and reported, in parts, the outbox
+- `packages/client/test/sync-unit.test.ts`, "a snapshot" (day 4): rebuilt from and reported, in parts, the outbox
   acknowledged by what the snapshot holds (a delete only when all of it is there), each out-of-place snapshot
   stopping the client, a dropped connection mid-snapshot, held during IME composition.
 - `packages/crdt/test/rga-blocks.test.ts` (day 4): the same random three-replica sessions with blocks of 1, 2 and 3
@@ -442,6 +442,17 @@ deletes, opens and renames and random restarts (every step reopened to the same 
 mutants, three now fail tests (`f2fc911`: blocks under out-of-order delivery, the snapshot due point after a reload,
 the old segment's descriptor closed); two only cost speed. It also found pruning stuck for good on a segment file
 already gone (deleted with force now, `f2fc911`) and the docs still describing the single array (fixed).
+
+**The tombstone collection** (built after the session; one agent at `2a26ec5`, about 26 minutes, asked to try to make
+a collecting server diverge, lose or resurrect text) reproduced three defects: **a re-anchored offline insert crossed
+visible text** someone else had typed concurrently, because the client looked for the new origin in its own old view
+(it now finds where the collected origin would be in the new replica by RGA's rule, `4db58f8`); **a snapshot write
+that failed after collecting left the replica collected and the disk not**, so a reload was a different document (the
+replica now changes only once the snapshot after the collection is written, `fed7dba`); and **loading collected spans
+was quadratic** (20,000 spans: 7.1 s; now merged in one pass). Its fuzzer found the leaf rule safe: 1,000 seeds, about
+8,200 elements collected and 251 resyncs, the collecting and never-collecting replicas showing the same elements in the
+same order at every step. Of its surviving mutants, the reload stamps and the catching-up member's hold on collection
+now fail tests; the rest are equivalent or unreachable.
 
 ## Review of day 3
 

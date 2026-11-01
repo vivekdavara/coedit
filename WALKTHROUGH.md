@@ -411,8 +411,9 @@ order, then deletes of the tombstones (`Rga.snapshot`). An insert's counter is a
 each origin is placed first, and any order with origins first builds the same sequence. Id order is also the fast
 one: nothing larger is placed yet, so each insert stops right after its origin. My first version used sequence order
 and was five times slower to load than the log, because an early tombstone sits after everything typed later at its
-spot and placing it scanned past all of it. Because they're just operations, a client that already has part of the document applies a
-snapshot like anything else: what it has is a duplicate, the rest merges. Runs go whole, not as the stretches the
+spot and placing it scanned past all of it. Because they're just operations, a new replica applies them like anything else; a client
+builds one from the snapshot rather than merging into its old one, since once tombstones are collected the snapshot
+lacks some deletes (and runs whose end was collected are shorter). Runs go whole, not as the stretches the
 sequence shows now, because a run's middle sent as a run of its own would conflict with a replica holding the run.
 
 **Who gets one?** A client whose `have` is older than the oldest entry the server keeps. The server keeps the newest

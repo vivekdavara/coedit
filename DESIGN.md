@@ -414,7 +414,8 @@ directory) each document has a directory of its own
 
 ```text
 log-<first>.jsonl       log entries first, first + 1, ...: one line each, {"seq":n,"op":<the op, canonical>}
-snapshot-<seq>.jsonl    the document after entry seq: a header {"seq":s,"ops":n}, then n operations, one a line
+snapshot-<seq>.jsonl    the document after entry seq: a header {"seq":s,"ops":n,"collected":m}, then n operations,
+                        one a line, then m spans of collected ids (day 4, "Tombstones"), one a line
 ```
 
 Numbers in names have 16 digits, so names sort as numbers do. Capital letters in a document's name are written as `^`
@@ -438,7 +439,8 @@ are two documents.
 - **A snapshot is a list of ordinary operations** (`Rga.snapshot`): every run's insert as it arrived, in id order
   (counter, then replica), then deletes of the tombstones. An insert's counter is larger than its origin's, so each
   insert's origin is placed by an earlier one; applying inserts in any order whose origins come first gives the same
-  sequence (convergence), so a new replica rebuilds exactly this state, and one that holds part of the log merges it.
+  sequence (convergence), so a new replica rebuilds exactly this state (and, before any collection, one that holds
+  part of the log could merge it; clients now rebuild instead, below).
   Id order is also the cheap one: nothing with a larger id is placed yet, so each insert's scan stops just after its
   origin. The first version used sequence order, valid too, but a tombstone typed early sits after everything typed
   after it at the same spot, and placing it scanned past all of that (loading from such a snapshot took 2,350 ms where
