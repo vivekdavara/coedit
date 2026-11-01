@@ -188,4 +188,64 @@ describe('collection in a stored hub', () => {
     assert.equal(again.state(), state);
     again.close();
   });
+
+  // Review of the collection: the stamps a reload gives, and a member catching up, were never checked.
+  const open = (root: string) =>
+    new DocumentHub('doc', { store: { root, fsync: false }, snapshotEvery: 4, collect: true });
+
+  test('a reload stamps the tombstones in its snapshot with its sequence number, so they are collected later', (t) => {
+    const root = tempDir(t);
+    const hub = open(root);
+    const w = new Rga('w');
+    hub.join(quiet, 0);
+    for (const c of 'abcde') hub.submit(quiet, w.edit(w.length, 0, c)); // 1-5
+    hub.submit(quiet, w.edit(4, 1, '')); // 6: backspaces e
+    for (const c of 'fg') hub.submit(quiet, w.edit(w.length, 0, c)); // 7-8: the snapshot at 8 lets go of 1-4
+    assert.doesNotMatch(hub.state(), /collected/);
+    hub.close();
+    const again = open(root); // the snapshot at 8 holds e as a tombstone
+    again.join(quiet, again.seq);
+    for (const c of 'hijk') again.submit(quiet, w.edit(w.length, 0, c)); // to 12: lets go of 5-8
+    assert.match(again.state(), /collected 5\+1@w$/);
+    again.close();
+  });
+
+  test('a reload stamps the entries it replays after its snapshot with their own numbers', (t) => {
+    const root = tempDir(t);
+    const hub = open(root);
+    const w = new Rga('w');
+    hub.join(quiet, 0);
+    for (const c of 'abcdefgh') hub.submit(quiet, w.edit(w.length, 0, c)); // 1-8
+    hub.submit(quiet, w.edit(7, 1, '')); // 9: backspaces h, after the snapshot at 8
+    hub.close();
+    const again = open(root); // replays 9 from the log
+    again.join(quiet, again.seq);
+    for (const c of 'ijk') again.submit(quiet, w.edit(w.length, 0, c)); // to 12: lets go of 5-8 only
+    assert.doesNotMatch(again.state(), /collected/, 'its delete is entry 9, still kept');
+    for (const c of 'lmno') again.submit(quiet, w.edit(w.length, 0, c)); // to 16: lets go of 9-12
+    assert.match(again.state(), /collected 8\+1@w$/);
+    again.close();
+  });
+
+  test('a member still catching up holds collection back to what it has been sent', (t) => {
+    const root = tempDir(t);
+    const hub = open(root);
+    const w = new Rga('w');
+    hub.join(quiet, 0);
+    for (const c of 'abc') hub.submit(quiet, w.edit(w.length, 0, c)); // 1-3
+    // A member that never finishes reading its first batch (entries 1-3): it still needs 4 on.
+    const stuck: Member = { replica: 's', send() {}, replace() {}, fail() {} };
+    hub.join(stuck, 0);
+    hub.submit(quiet, w.edit(2, 1, '')); // 4: backspaces c
+    for (let i = 0; i < 12; i++) hub.submit(quiet, w.edit(w.length, 0, 'x')); // to 16
+    assert.doesNotMatch(
+      hub.state(),
+      /collected/,
+      'entry 4 is still to be sent to the stuck member',
+    );
+    hub.leave(stuck);
+    for (let i = 0; i < 8; i++) hub.submit(quiet, w.edit(w.length, 0, 'y')); // to 24
+    assert.match(hub.state(), /collected 3\+1@w$/);
+    hub.close();
+  });
 });

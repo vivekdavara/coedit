@@ -683,8 +683,11 @@ export class Rga {
    * in id order (counter, then replica), then deletes of the tombstones in sequence order. An insert's counter is
    * larger than its origin's, so each origin comes first, and applying the inserts in any order whose origins come
    * first gives the same sequence (that's the CRDT's convergence). Applied to a new replica they give this replica's
-   * `state()`; applied to one holding some of the operations this replica has applied, they bring it to everything
-   * this replica has. Id order also makes them cheap to apply: no larger id is placed yet, so each insert's scan stops
+   * `state()` (with markCollected of collectedSpans() first, if it has collected anything); applied to one holding
+   * some of the operations this replica has applied, they bring it to everything this replica has, as long as
+   * nothing of those was collected here (a run whose end was collected is written shorter, which a replica holding
+   * the whole run refuses as a conflict: clients rebuild rather than merge, DESIGN.md "Persistence (day 4)"). Id order
+   * also makes them cheap to apply: no larger id is placed yet, so each insert's scan stops
    * just after its origin. (The first version wrote them in sequence order, which is valid too, but a tombstone typed
    * early sits after everything typed after it, and placing it scanned past all of that: loading a snapshot of
    * 100,000 entries took 2,350 ms against 467 ms for the log.) The inserts are the original runs, not the stretches
@@ -746,9 +749,7 @@ export class Rga {
       // review of the collection found a failed snapshot write leaving the replica collected and the disk not).
       const without = new Set(taken);
       const collected = new IdRanges();
-      for (const span of this.#collected.spans(MAX_SPAN_LENGTH)) {
-        collected.addSpan(span.replica, span.counter, span.length);
-      }
+      collected.addSpans(this.#collected.spans(MAX_SPAN_LENGTH));
       collected.addAll(taken.map((e) => e.id));
       write({ ops: this.#snapshot(without), collected: collected.spans(MAX_SPAN_LENGTH) });
     }
@@ -835,8 +836,8 @@ export class Rga {
         }
       }
     }
+    this.#collected.addSpans(spans);
     for (const span of spans) {
-      this.#collected.addSpan(span.replica, span.counter, span.length);
       if (span.replica === this.replica) {
         this.#clock = Math.max(this.#clock, span.counter + span.length - 1);
       }

@@ -124,11 +124,11 @@ export class SyncClient {
   /** This client's selection as ids (what it last sent or will send), and everyone else's. */
   #cursor: Cursor | null = null;
   readonly #remote = new Map<string, Cursor>();
-  /** While hold() is on: `ops` and `snapshot` messages received and not yet applied. */
+  /** While hold() is on: `ops`, `snapshot` and `collected` messages received and not yet applied. */
   #held: (ServerMessage & { type: 'ops' | 'snapshot' | 'collected' })[] | null = null;
   /**
-   * A snapshot being received: the first id of each insert in it, and its tombstones' spans by replica. At its last
-   * part they say which outbox operations the server had logged (see the 'snapshot' case).
+   * A snapshot being received: the collected ids that came before its parts, and the replica being built from them
+   * (null until the first part). Swapped in at the last part (#rebuild).
    */
   #snapshot: { rga: Rga | null; collected: Span[] } | null = null;
   /**
@@ -351,7 +351,14 @@ export class SyncClient {
             try {
               for (const change of this.#rga.apply(op)) changes.push(change);
             } catch (error) {
-              if (!(error instanceof ConflictError || error instanceof RangeError)) throw error;
+              // CollectedError: an entry naming an element this replica (rebuilt from a snapshot) holds as collected.
+              if (!(
+                error instanceof ConflictError ||
+                error instanceof RangeError ||
+                error instanceof CollectedError
+              )) {
+                throw error;
+              }
               this.#fail(`this replica refuses log entry ${this.#seq + 1}: ${error.message}`);
               if (changes.length > 0) this.#events.onChanges?.(changes);
               return;
@@ -458,9 +465,10 @@ export class SyncClient {
    * (its echo was in the entries the snapshot replaces) and leaves the outbox; a delete all of whose ids are its
    * tombstones or collected has its effect there already and leaves too. The rest were never logged: applied to the
    * new replica and kept, a delete without the collected ids it named (they're deleted), and an insert whose origin
-   * was collected re-anchored after the nearest element before it, in the old replica's sequence, that the new one
-   * holds with a smaller id (so the operation stays valid under its own id, which no one has seen). Its text
-   * survives; its place next to deleted text may move. The editor gets the difference between the two texts.
+   * was collected re-anchored where that origin would be in the new replica by RGA's rule (or, if the element there
+   * has a counter not smaller than the insert's, the nearest one before it that has, which keeps the operation valid
+   * under its own id, which no one has seen). Its text survives; its place next to deleted text may move. The editor
+   * gets the difference between the two texts.
    */
   #rebuild(fresh: Rga, seq: number): void {
     const old = this.#rga;
@@ -536,7 +544,8 @@ export class SyncClient {
         if (!(
           error instanceof ConflictError ||
           error instanceof RangeError ||
-          error instanceof CollectedError
+          error instanceof CollectedError ||
+          error instanceof ProtocolError
         )) {
           throw error;
         }
@@ -602,8 +611,7 @@ export class SyncClient {
     this.#socket = null;
     this.#target = null;
     this.#live = false;
-    // A snapshot cut off part way: what of it was applied stays (operations merge), and the next connection sends
-    // a whole one again.
+    // A snapshot cut off part way is dropped (it was being built aside), and the next connection sends a whole one.
     this.#snapshot = null;
     // Entries held from this connection come again on the next (its hello asks from the last one applied).
     if (this.#held !== null) this.#held = [];

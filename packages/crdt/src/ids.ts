@@ -76,7 +76,10 @@ export class IdMap<V> {
 
 /**
  * Sets of ids as ranges of consecutive counters, per replica, sorted and merged: the ids a replica has collected (day
- * 4), which can be many but come mostly in long runs. Lookups are a binary search.
+ * 4). Collection takes typos all over a document, so these are many short ranges as often as long ones (8,809 for
+ * 35,414 ids in the 100,000-edit session). Lookups are a binary search; adding merges each replica's list once per
+ * call, so add in batches (addAll, addSpans), not one range at a time (review of the collection: a span at a time made
+ * loading 20,000 spans take 7 s).
  */
 export class IdRanges {
   /** Per replica: disjoint, non-adjacent [first, last] ranges in counter order. */
@@ -130,9 +133,16 @@ export class IdRanges {
     }
   }
 
-  /** Adds `length` ids of `replica` from `counter`. */
-  addSpan(replica: string, counter: number, length: number): void {
-    this.#merge(replica, [[counter, counter + length - 1]]);
+  /** Adds spans of ids (any order). */
+  addSpans(spans: readonly { replica: string; counter: number; length: number }[]): void {
+    const byReplica = new Map<string, [number, number][]>();
+    for (const { replica, counter, length } of spans) {
+      const ranges = byReplica.get(replica);
+      const range: [number, number] = [counter, counter + length - 1];
+      if (ranges === undefined) byReplica.set(replica, [range]);
+      else ranges.push(range);
+    }
+    for (const [replica, ranges] of byReplica) this.#merge(replica, ranges);
   }
 
   /** Every range, by replica in code-unit order then counter, each as a span of at most `maxLength` ids. */
@@ -148,7 +158,7 @@ export class IdRanges {
     return spans;
   }
 
-  /** Merges sorted, merged `added` into `replica`'s ranges. */
+  /** Merges `added` (any order, overlaps allowed) into `replica`'s ranges. */
   #merge(replica: string, added: readonly [number, number][]): void {
     const old = this.#ranges.get(replica) ?? [];
     const all = [...old, ...added].sort((a, b) => a[0] - b[0]);
