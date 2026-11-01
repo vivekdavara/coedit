@@ -360,7 +360,7 @@ Measured on an Apple M3 (macOS 26.6.2, Node 23.11.0, on AC, awake throughout). A
 
 ## Tests
 
-`npm test` runs 524 tests in 99 suites in about 21 s (522 at v1.0.0; Node's runner, files in parallel), and
+`npm test` runs 525 tests in 99 suites in about 21 s (522 at v1.0.0; Node's runner, files in parallel), and
 `npm run e2e -w @coedit/client` runs the 4 Playwright tests; CI runs both on every push (the suite on Node 22 and
 24). By file:
 
@@ -464,7 +464,8 @@ Measured on an Apple M3 (macOS 26.6.2, Node 23.11.0, on AC, awake throughout). A
   where only convergence is asserted and the count of other orders is reported; renamed deletes, text typed inside
   re-issued text, the renamed cursor, a snapshot missing an origin; and, added after the tag, a paste split into
   several inserts and a second rebuild with re-issued text still unsent. `review-d5-*.test.ts`,
-  `review-d5r2-*.test.ts`, `review-d5r3-*.test.ts`: the release review's findings.
+  `review-d5r2-*.test.ts`, `review-d5r3-*.test.ts`, `review-d5r4-*.test.ts` (which pins a known limitation): the
+  release review's findings.
 - `review-d4-*.test.ts` (day 4): the review's findings, each of which failed before its fix.
 - `review1-*.test.ts`, `review2-*.test.ts`: the reviews' findings, each of which failed before its fix.
 
