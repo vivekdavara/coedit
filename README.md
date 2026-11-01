@@ -524,7 +524,14 @@ collision case by hand, and counted in `reissue.test.ts` 777 sessions where a ne
 fuzzer of its own, 2,980 sessions, all converged). It found an older defect instead: **a reloaded server forgot the
 counters of other replicas' collected elements** (`markCollected` moved the clock only for its own replica), so an
 honest client that had seen them could have its next insert refused for good. Now every collected id moves the clock
-(`88529dc`). That fix was not reviewed again.
+(`88529dc`).
+
+**Round 4.** One agent on that fix, about 6 minutes, after the tag: it broke nothing (a differential probe of 600
+random runs with reloads mid-run read the clock before and after each reload: 0 mismatches, no honest client
+refused). It found that `#check`'s argument for the clock bound (under capacity squared) assumed the server never
+held more than a capacity of elements, which collection undoes: a hostile client can walk the clock up a capacity per
+insert. Not fixed for v1.0.0; the comment and DESIGN are corrected, it's under Limitations, and its test pins the
+current behaviour.
 
 Also found on day 5, by the commit check: `signal-order.test.ts` read the probe's stderr line as if it always arrived
 before the "listening" line on stdout; they are two pipes, and under load it failed (`70b6bb1`).
@@ -810,6 +817,12 @@ the later days closed is gone from this one.
   replica id: a client can say `hello` with any id (presence reveals the others'), and two connections with the same id
   replace each other. It refuses inserts under another connection's id.
 - **Nothing limits how often a client sends.** A message's deletes are bounded, but not the rate of messages.
+- **A hostile client can use up a document's clock.** The server refuses an insert ending more than a capacity past
+  its clock, which kept the clock under capacity squared while the document held at most a capacity of elements;
+  collection frees them, so inserting a character a capacity ahead and deleting it, over and over, raises the clock
+  a capacity each time: about 2^30 inserts (a million messages of 1,000) at the default capacity, after which no one
+  can insert (release review, round 4; `review-d5r4-clock-bound-collection.test.ts` pins it). Bounding inserts by the
+  elements ever accepted plus a capacity would close it; not built.
 - **The server refuses rather than repairs**: an operation it refuses stops that client (the editor says so and keeps
   the text). Only a buggy or tampered client sends one, but a client that hits the document's capacity is stopped the
   same way.

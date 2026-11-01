@@ -324,8 +324,12 @@ logged and relayed. It refuses:
   counters are at most the server's clock (it has seen nothing newer: everything it has came from the server or from
   itself) plus the elements it has made since, which its own capacity bounds. So the server refuses an insert whose
   last counter is more than its capacity (2^23 - 1) past its clock. Then each accepted insert moves the clock at most
-  a capacity on, each makes at least one element, and the server holds at most a capacity of elements: the clock
-  stays below capacity squared, about 2^46, and can't run out before the document is full. A delete can't move
+  a capacity on, each makes at least one element, and without collection the server holds at most a capacity of
+  elements: the clock stays below capacity squared, about 2^46, and can't run out before the document is full.
+  Collection (day 4) frees elements, which breaks that: a client inserting a character a capacity ahead and deleting
+  it, over and over, raises the clock a capacity each time, about 2^30 inserts to use it up at the default capacity
+  (day 5's release review, round 4). Refusing an insert that ends more than a capacity past the number of elements
+  ever accepted (held plus collected, which a reload can count) would bound it again; not built. A delete can't move
   anyone's clock past an id that exists, since it may only name placed elements.
 - **A delete whose spans overlap.** Applying a delete visits every id it names, and the wire format lets all 1,000
   spans name the same 10,000 ids: one 1 MiB message of such deletes kept the server from every other client for

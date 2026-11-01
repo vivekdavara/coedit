@@ -331,7 +331,10 @@ most the server's clock (it has seen nothing the server hasn't) plus the element
 bounds those. So the server refuses an insert ending more than its capacity past its clock. Each accepted insert then
 moves the clock at most a capacity, makes at least one element, and the server holds at most a capacity of elements:
 the clock stays under capacity squared, about 2^46. `hub.test.ts` runs that with a capacity of 1,000: the largest
-jumps fill the document at clock 10^6, and the next insert is refused because the document is full.
+jumps fill the document at clock 10^6, and the next insert is refused because the document is full. Day 5's release
+review found the hole collection opened: collected elements free capacity, so a client can insert a character a
+capacity ahead and delete it, over and over; about 2^30 inserts use the clock up. The fix would bound inserts by the
+elements ever accepted plus a capacity; it's listed, not built.
 
 **What happens to the caret when someone else types?** `textarea.ts`: an insert strictly before it shifts it; one
 exactly at it leaves it before the new text. The caret means "after the element before me", and the new text went
@@ -582,7 +585,9 @@ inserts after collected text reordered them (now they're re-issued under new ids
 ids could run past the server's limit on how far ahead a counter may be, and text typed after the snapshot can still
 land on the other side of a re-issued insert (accepted and documented: they're concurrent). Round 3 found nothing in
 round 2's fix, but found that a reloaded server forgot collected elements' counters, which could stop an honest
-client. The pattern from the earlier days held: each round found bugs in the previous round's fixes, until the last.
+client. Round 4, after the tag, found nothing in that fix but showed collection had broken the argument that a client
+can't use up the clock (documented, not fixed). The pattern from the earlier days held: each round found bugs in the
+previous round's fixes, until the last two.
 
 **Why not group commit before releasing?** It would raise the throughput cap (one fsync for every message that arrived
 during the previous one), not the latency a single typist sees, and it changes the durability path, the part where a

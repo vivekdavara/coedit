@@ -492,8 +492,11 @@ export class DocumentHub {
       // newer; a reloaded server's clock counts the collected ids too, Rga.markCollected) plus the elements it made
       // since, which its capacity bounds; so the server refuses an insert ending
       // more than its own capacity past its clock. Then each insert moves the clock at most a capacity on, an insert
-      // makes at least one element, and the server holds at most a capacity of them: the clock stays below
-      // capacity squared (2^46), and can't run out before the document is full.
+      // makes at least one element, and without collection the server holds at most a capacity of them: the clock
+      // stays below capacity squared (2^46). Collection frees elements, so that bound is gone: a client inserting a
+      // character a capacity ahead and deleting it, over and over, raises the clock a capacity each time (release
+      // review, round 4: about 2^30 inserts use it up at the default capacity). Bounding an insert by the elements
+      // ever accepted (held plus collected) plus a capacity would restore it; not built (README "Limitations").
       const last = op.id.counter + codePoints(op.text) - 1;
       if (last > rga.clock + rga.capacity) {
         return `its counters end at ${last}, more than ${rga.capacity} past this document's clock (${rga.clock})`;
