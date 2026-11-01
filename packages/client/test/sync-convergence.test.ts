@@ -60,9 +60,13 @@ before(async () => {
   stored = await startServer({ port: 0, dataDir: data, fsync: false, snapshotEvery: 3 });
 });
 after(async () => {
-  await server.close();
-  await stored.close();
-  fs.rmSync(data, { recursive: true, force: true });
+  try {
+    await server.close();
+    await stored.close();
+  } finally {
+    // Removed however the closes go (some runs left the directory behind).
+    fs.rmSync(data, { recursive: true, force: true });
+  }
 });
 
 /** A client that keeps the text an editor would show: patched by its own edits and the reported changes. */
