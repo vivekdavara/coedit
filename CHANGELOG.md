@@ -29,7 +29,8 @@ The first release: a collaborative plain-text editor on a hand-written RGA, buil
   unloaded after 60 s; a corrupt document refused while the others are served.
 - Collection at each snapshot of what the snapshot lets go of, written with the snapshot; `resync` for a client that
   names a collected element. A snapshot whose directory can't be synced after its rename stops the hub, so the next
-  join loads what is on disk; every open syncs the directory.
+  join loads what is on disk; every open syncs the directory. A reloaded server's clock counts the collected ids,
+  so it accepts what it accepted before the reload.
 - `/healthz`, origin checks (`COEDIT_ORIGINS`), a 1 MiB message limit, a heartbeat, a slow-reader limit, signal
   handling, and `COEDIT_HOST`, `COEDIT_PORT`, `COEDIT_DATA`.
 
@@ -47,6 +48,8 @@ The first release: a collaborative plain-text editor on a hand-written RGA, buil
 - Property tests against an independent implementation of the ordering spec, end-to-end convergence on the real server
   under generated schedules (with and without collection), SIGKILL while a client types, injected storage failures,
   and Playwright with two browsers editing at once and offline.
-- Reviews on every day by a separate agent writing each finding as a failing test (the `review*` test files).
+- Reviews on every day by a separate agent writing each finding as a failing test (the `review*` test files), and a
+  three-round release review on day 5.
+- `npm run rebuild-cost -w @coedit/client`: what a rebuild from a snapshot costs, with and without re-issuing.
 
 See the README for measured results and limitations.

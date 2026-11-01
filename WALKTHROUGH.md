@@ -575,6 +575,15 @@ answer is that the difference is noise from the script's order: the in-memory hu
 and the gap is under 0.01 ms a message (77,000 to 116,000 messages a second, against 340 with fsync). I report it as
 measured and say so, rather than drop the row or reorder until it looks right.
 
+**What did the release review find?** Three rounds, each a separate agent writing every defect as a failing test
+before I fixed it. Round 1: a snapshot whose directory sync failed after its rename left disk and memory disagreeing,
+and the document stopped loading (now the hub stops and reloads from disk); and the client's re-anchoring of offline
+inserts after collected text reordered them (now they're re-issued under new ids). Round 2, on those fixes: the new
+ids could run past the server's limit on how far ahead a counter may be, and text typed after the snapshot can still
+land on the other side of a re-issued insert (accepted and documented: they're concurrent). Round 3 found nothing in
+round 2's fix, but found that a reloaded server forgot collected elements' counters, which could stop an honest
+client. The pattern from the earlier days held: each round found bugs in the previous round's fixes, until the last.
+
 **Why not group commit before releasing?** It would raise the throughput cap (one fsync for every message that arrived
 during the previous one), not the latency a single typist sees, and it changes the durability path, the part where a
 bug loses acknowledged edits. At about 340 messages a second, with people typing a few characters a second, it isn't

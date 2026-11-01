@@ -148,6 +148,25 @@ nothing on disk, the acknowledgement's p50 was 0.56 ms. The difference, about 3 
 `F_FULLFSYNC` on this Mac (see "Durable acknowledgements" under Limitations). The storage script's snapshot is 18.5%
 smaller than day 4's 9,609,593 bytes because the server now collects what it can when it writes one.
 
+**After the release review's fixes** (at `88529dc`, 16:10 to 16:11, on AC, nothing else of mine running; the storage
+lines at `56d26d1`, 15:57, whose server differs only in the clock rule of round 3):
+
+| What                                                    | Result                                                          | Command                                     |
+| ------------------------------------------------------- | --------------------------------------------------------------- | ------------------------------------------- |
+| Local typing, last tenth of the session                 | 249,420 edits/s                                                 | `npm run editing -w @coedit/crdt`           |
+| A second replica applying all 95,043 operations         | 352,170 ops/s; 198,821/s through the decoder                    | `npm run editing -w @coedit/crdt`           |
+| Tombstone collection                                    | the same 35,414 (31.5%), in 37 ms                               | `npm run editing -w @coedit/crdt`           |
+| Durable appends (fsync every message)                   | 325 messages/s; submit p50 2.98 ms, p99 4.84 ms                 | `npm run storage -w @coedit/server`         |
+| Opening a 100,000-entry document from its log, snapshot | 507 ms, 310 ms                                                  | `npm run storage -w @coedit/server`         |
+| Edit to acknowledgement; to each other client           | p50 3.67 ms, p99 19.80 ms; p50 3.78 ms, p99 19.87 ms            | `npm run sync-latency -w @coedit/client`    |
+| A rebuild from a 100,000-character snapshot             | 338.0 to 340.6 ms; 548.7 to 620.7 ms when it re-issues          | `npm run rebuild-cost -w @coedit/client`    |
+| Tests                                                   | 522 in 99 suites, all passing, 20.7 s; Playwright 4 of 4, 4.8 s | `npm test`, `npm run e2e -w @coedit/client` |
+
+The latency run's tail was higher than at 15:03 (p99 19.80 ms against 5.24 and 5.52) with the same median; it ran
+once, right after the editing script, and I didn't look further. Re-issuing replays the snapshot into a scratch
+replica, which is the extra 208 to 283 ms; it happens only to a client whose unsent text was typed after something
+collected.
+
 ## Results (day 4)
 
 Measured on the Apple M3 (macOS 26.6.2, Node 23.11.0), **on battery** (44% at 15:01, 33% at 15:31), nothing else of
@@ -335,7 +354,7 @@ Measured on an Apple M3 (macOS 26.6.2, Node 23.11.0, on AC, awake throughout). A
 
 ## Tests
 
-`npm test` runs 504 tests in 98 suites in about 18 s (Node's runner, files in parallel), and
+`npm test` runs 522 tests in 99 suites in about 21 s (Node's runner, files in parallel), and
 `npm run e2e -w @coedit/client` runs the 4 Playwright tests; CI runs both on every push (the suite on Node 22 and
 24). By file:
 
@@ -491,6 +510,14 @@ counterexample. Of its 18 mutants of the new code, one survived (the scratch rep
 tested. On the final code the round-1 fuzzer, 3,000 seeds each for three sets of names: 0 divergent, 0 unconverged,
 0 failed. Left as they are: a `resync` and a failed snapshot sync in one message give the client `server-error` (one
 more round trip); a client's own cursor at a collected element stays hidden until it moves.
+
+**Round 3.** One agent on round 2's counter change (`e57064c`), about 10 minutes: no defect in it (it checked each
+collision case by hand, and counted in `reissue.test.ts` 777 sessions where a new id reused an abandoned counter and
+219 where it equalled a later unsent insert's old id; 10 mutants, 9 killed, the survivor equivalent; a second-rebuild
+fuzzer of its own, 2,980 sessions, all converged). It found an older defect instead: **a reloaded server forgot the
+counters of other replicas' collected elements** (`markCollected` moved the clock only for its own replica), so an
+honest client that had seen them could have its next insert refused for good. Now every collected id moves the clock
+(`88529dc`). That fix was not reviewed again.
 
 Also found on day 5, by the commit check: `signal-order.test.ts` read the probe's stderr line as if it always arrived
 before the "listening" line on stdout; they are two pipes, and under load it failed (`70b6bb1`).
