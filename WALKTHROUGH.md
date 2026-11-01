@@ -507,8 +507,22 @@ that catches up from the log will": every operation is stamped with its log entr
 the last delete naming it, and at each snapshot the server collects leaves whose last delete is in an entry the
 snapshot lets go of. A client that catches up from the log has applied that delete, and one further behind gets a
 snapshot. One that names a collected element anyway (made before it saw the delete, sent after) gets `resync`: it
-rejoins asking for everything, rebuilds from a snapshot, and re-anchors its unsent insert after the nearest earlier
-element the server still has with a smaller id, so the operation stays valid under its own id.
+rejoins asking for everything, rebuilds from a snapshot, and re-issues its unsent inserts (next question).
+
+**Where does an unsent insert go when the text it was typed after is gone?** Where it would have gone if nothing had
+been collected. The client builds a scratch replica of the snapshot plus the collected elements its inserts lead back
+to (its old replica still has them as tombstones) plus its unsent inserts, and reads off the order. Then, from the
+first insert whose origin was collected on, it re-issues each one under a new id above its clock, after the nearest
+element before it in that order that the new replica holds. A new id is larger than everything, so RGA puts it right
+after that origin: the order comes out exactly. It can change the ids because none of those inserts was ever logged:
+the server refuses an insert naming a collected element, and a client sends in order. Later deletes and its own
+cursor are renamed to match. (`packages/client/src/sync.ts`, `placeUnsent`; `reissue.test.ts`.)
+
+**Why not keep the ids and pick a better origin?** That was the first version, and the release review broke it twice:
+two inserts after one collected element came back swapped, because the second search passed the first; and when no
+origin with a smaller counter sat in the right place, the fallback crossed visible text, since RGA compares whole ids
+(counter, then replica) and equal counters are common. Under an insert's own id there may be no origin that puts it in
+the right place at all; under a fresh id there always is.
 
 **How much does it collect?** A third: 35,414 of 112,386 tombstones in the synthetic 100,000-edit session, and the
 snapshot shrinks 30%. Not more, because a stretch deleted from the middle of typed text is a chain where each

@@ -452,8 +452,12 @@ are two documents.
   on disk and in memory, so a client that missed less than one interval still catches up from the log. A member
   still catching up keeps the entries it hasn't been sent. If a new segment can't be started (the snapshot itself is
   in place), appends go on in the old one, which is kept whole until a later snapshot starts one; while that keeps
-  failing nothing is pruned, and the log on disk and in memory grows (the failure is logged at every snapshot). A snapshot that fails to write loses nothing (the log has
-  every entry); the hub logs it and goes on.
+  failing nothing is pruned, and the log on disk and in memory grows (the failure is logged at every snapshot). A
+  snapshot that fails to write loses nothing (the log has every entry); the hub logs it and goes on. One that was
+  renamed into place but whose directory then couldn't be synced (day 5's release review) is on disk, collected,
+  while the hub's replica isn't, and may not survive a power loss: the store throws `UnsyncedSnapshotError` (pruning
+  nothing) and the hub fails as for a failed append (below), so the next join loads what is on disk. Every open
+  syncs the directory, so that is durable before anything is appended after it.
 - **A client too far behind** (its `have` is older than the oldest entry kept, `base`) gets, after `welcome`, the
   document as it is at the join, as `snapshot` messages (each at most 1,000 operations and 1 MiB, the last marked
   `last`), preceded by `collected` messages if the document has collected tombstones ("Tombstones" below), then the
@@ -471,8 +475,9 @@ are two documents.
   logged (another client's delete of the same text), but it needs no echo: it changes nothing anywhere now. Nothing
   logged after the snapshot can be in it, and nothing of this connection's outbox has been sent yet (the client sends
   it once caught up), so every operation dropped is one whose echo would never come, and every one kept is still to
-  be logged. A kept delete loses the collected ids it named (they're deleted already); a kept insert whose origin was
-  collected is re-anchored ("Tombstones"). The editor gets the difference between the old text and the new.
+  be logged. A kept delete loses the collected ids it named (they're deleted already); from a kept insert whose
+  origin was collected on, inserts are re-issued under new ids ("Tombstones"). The editor gets the difference between
+  the old text and the new.
 - **A failed append** (a full disk) leaves the replica holding operations the disk may not hold. The hub closes
   every member with `server-error` (which clients retry) and refuses everything after; the server drops it, and the
   next join loads the document from what reached the disk. Nothing of the failed message was relayed, and its sender
@@ -504,13 +509,23 @@ the ones it can prove nothing will need, by the **leaf rule** (built after day 4
   delete naming it. At each snapshot the server collects the leaf tombstones whose last delete is in an entry that
   snapshot lets go of (`collect(keepFrom - 1)`): every client that will catch up from the log has applied it, and one
   further behind gets a snapshot. Nothing in the kept log names a collected element (an insert after it would have
-  made it a non-leaf, a later delete would have stamped it later), so a reload replays cleanly.
+  made it a non-leaf, a later delete would have stamped it later), so a reload replays cleanly. That holds only if
+  the replica collects exactly what the snapshot on disk did, which is why a snapshot whose directory sync failed
+  stops the hub instead (release review).
 - **A client that names one anyway** (it made the operation before it saw the delete, and sends it after the
   collection: an offline client, mostly) is refused with `resync`, the server changing nothing. Its next hello asks
-  for everything, and it rebuilds from a snapshot ("The outbox after a snapshot"); an unsent insert whose origin was
-  collected is re-anchored after the nearest element before it, in the client's old sequence, that the new replica
-  holds with a smaller id, which keeps the operation valid under its own id (no one has seen it). Its text survives;
-  its place next to deleted text may move.
+  for everything, and it rebuilds from a snapshot ("The outbox after a snapshot"). From the first unsent insert whose
+  origin was collected on, every unsent insert is **re-issued**: a new id above the clock, and as origin the nearest
+  element before it, in the order a server that never collected would give, that the new replica holds by then.
+  That order comes from a scratch replica: the snapshot, the collected elements the origins lead back to (from the
+  old replica, which never collects), and the unsent inserts under their own ids. RGA's order depends only on which
+  elements exist, and collected leaves can be removed from the origin tree without reordering the rest, so the
+  scratch replica's sequence is that server's restricted to these elements. A new id is larger than every id in the
+  new replica, so the insert lands right after its origin, which reproduces that order exactly; later deletes and the
+  client's own cursor are renamed. None of these inserts was ever logged (the server refuses an insert naming a
+  collected element, and a client sends in order: everything after a refused insert went unlogged too), so no one
+  has seen the old ids. The first version re-anchored each insert in place, under its own id, and the release review
+  found two inserts after one collected element swapped, and an insert crossing visible text when counters tie.
 - **Kept.** The collected ids are kept as ranges (`IdRanges`): to refuse operations naming them, to skip them in
   deletes, and to tell a client rebuilding from a snapshot that an outbox insert under one was logged. They go into
   the snapshot file after its operations and to clients in `collected` messages before a snapshot's parts.

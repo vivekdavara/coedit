@@ -432,6 +432,11 @@ Measured on an Apple M3 (macOS 26.6.2, Node 23.11.0, on AC, awake throughout). A
 - `packages/client/test/sync-unit.test.ts`, "collected ids", and `sync-convergence.test.ts`'s second property (day 4):
   acknowledgement by collected ids, re-anchoring, `resync`; convergence on a stored server collecting every 3 entries.
 - `packages/client/e2e/two-browsers.spec.ts` (day 4): see Results.
+- `packages/client/test/reissue.test.ts` (day 5, from the release review): 1,000 sessions each with the other
+  replicas' names sorting after the client's and on both sides of it: a client offline types after text that others
+  then delete, the server collects, the client rebuilds and re-issues, and must end with the text of a server that
+  never collects (with a census of what was collected and re-issued); renamed deletes, text typed inside re-issued
+  text, the renamed cursor. `review-d5-*.test.ts`: the release review's findings.
 - `review-d4-*.test.ts` (day 4): the review's findings, each of which failed before its fix.
 - `review1-*.test.ts`, `review2-*.test.ts`: the reviews' findings, each of which failed before its fix.
 
@@ -694,8 +699,9 @@ the later days closed is gone from this one.
   heap barely shrinks (the snapshot does, by 30%). Only the server collects; clients keep their tombstones until they
   rebuild from a snapshot.
 - **A client resynced or far behind rebuilds its whole replica** from a snapshot (all of the document, about 40 bytes
-  a visible character), and an unsent insert whose origin was collected is re-anchored: its text survives, its place
-  next to deleted text may move.
+  a visible character), and its unsent inserts from the first whose origin was collected on are re-issued under new
+  ids (their text and place are kept). A remote cursor sitting at a collected element isn't shown until its owner
+  moves it.
 - **Positions are found in blocks, not a tree**: about n / 512 + 512 steps an operation, flat at the sizes measured,
   but still linear in the number of blocks.
 - **A document holds at most 8,388,607 elements** (2^23 - 1), tombstones and waiting operations included, because a

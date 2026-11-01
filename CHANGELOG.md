@@ -28,7 +28,8 @@ The first release: a collaborative plain-text editor on a hand-written RGA, buil
   fsync, rename, directory fsync); recovery that drops a torn last line and refuses any other damage; idle documents
   unloaded after 60 s; a corrupt document refused while the others are served.
 - Collection at each snapshot of what the snapshot lets go of, written with the snapshot; `resync` for a client that
-  names a collected element.
+  names a collected element. A snapshot whose directory can't be synced after its rename stops the hub, so the next
+  join loads what is on disk; every open syncs the directory.
 - `/healthz`, origin checks (`COEDIT_ORIGINS`), a 1 MiB message limit, a heartbeat, a slow-reader limit, signal
   handling, and `COEDIT_HOST`, `COEDIT_PORT`, `COEDIT_DATA`.
 
@@ -37,7 +38,8 @@ The first release: a collaborative plain-text editor on a hand-written RGA, buil
 - A React textarea editor: each input becomes one edit in code points; remote changes patched into the text with the
   caret kept beside its element; remote cursors; held during IME composition; an offline switch.
 - The sync client: an outbox resent from the right place after a reconnect, backoff, rebuilding from a snapshot (unsent
-  edits gone over again, inserts whose origin was collected re-anchored), and rejoining after `resync`.
+  edits gone over again, inserts from the first whose origin was collected on re-issued under new ids where a
+  never-collecting server would put them), and rejoining after `resync`.
 
 ### Testing
 
