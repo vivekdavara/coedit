@@ -28,7 +28,7 @@ import {
   type Op,
   type Span,
 } from '@coedit/crdt';
-import { DocumentStore, StoreError, type StoreOptions } from './store.ts';
+import { DocumentStore, StoreError, UnsyncedSnapshotError, type StoreOptions } from './store.ts';
 
 /** A client joined to a hub. */
 export interface Member {
@@ -396,7 +396,10 @@ export class DocumentHub {
       for (const [other, state] of this.#members) if (state.next === null) other.send(text);
       next += batch.length;
     }
-    if (this.#store !== null && this.seq >= this.#snapshotDue) this.#takeSnapshot(this.#store);
+    if (this.#store !== null && this.seq >= this.#snapshotDue) {
+      const failure = this.#takeSnapshot(this.#store, member);
+      if (failure !== null) return failure;
+    }
     return refusal;
   }
 
@@ -404,9 +407,12 @@ export class DocumentHub {
    * Writes a snapshot after the last entry, and drops the entries before the previous snapshot from disk and from
    * memory, except those a member still catching up hasn't been sent. A snapshot that fails to write loses
    * nothing (the log has every entry), so the hub goes on, and tries again an interval later, not at every message
-   * (review of day 4: a failure that lasted wrote a whole copy of the document per keystroke).
+   * (review of day 4: a failure that lasted wrote a whole copy of the document per keystroke). One that was renamed
+   * into place but whose directory couldn't be synced is on disk, collected, while the replica isn't: accepting an
+   * insert after a tombstone the disk says is collected would make the document unloadable (release review), so
+   * the hub fails as for a failed append, and the next join loads what's on disk. Returns the sender's refusal then.
    */
-  #takeSnapshot(store: DocumentStore): void {
+  #takeSnapshot(store: DocumentStore, sender: Member): Refusal | null {
     this.#snapshotDue = this.seq + this.#snapshotEvery;
     let keepFrom = this.#snapshotSeq + 1;
     for (const { next } of this.#members.values()) {
@@ -423,8 +429,10 @@ export class DocumentHub {
       if (this.#collect) this.#rga.collect(keepFrom - 1, write);
       else write({ ops: this.#rga.snapshot(), collected: this.#rga.collectedSpans() });
     } catch (error) {
+      if (error instanceof UnsyncedSnapshotError)
+        return this.#fail(error, sender, 'syncing a snapshot');
       console.error(`coedit: writing a snapshot of ${this.doc} failed`, error);
-      return;
+      return null;
     }
     this.#snapshotSeq = this.seq;
     const drop = keepFrom - 1 - this.#base;
@@ -432,6 +440,7 @@ export class DocumentHub {
       this.#log = this.#log.slice(drop);
       this.#base += drop;
     }
+    return null;
   }
 
   /**
@@ -439,10 +448,12 @@ export class DocumentHub {
    * been relayed. The hub can't go on without the disk and the replica disagreeing, so it closes the store and
    * every member's connection (`server-error`, which clients retry); the server drops it, and the next join loads the
    * document again from what reached the disk. The sender keeps the operations in its outbox and resends them.
+   * Also used when a snapshot's directory sync failed: then the entries were stored and relayed, and the members
+   * catch up from disk when they reconnect.
    */
-  #fail(error: unknown, sender: Member): Refusal {
+  #fail(error: unknown, sender: Member, what = 'storing log entries'): Refusal {
     this.#broken = true;
-    console.error(`coedit: storing log entries of ${this.doc} failed; closing it`, error);
+    console.error(`coedit: ${what} of ${this.doc} failed; closing it`, error);
     try {
       this.#store?.close();
     } catch {

@@ -7,7 +7,7 @@ import path from 'node:path';
 import { describe, test, type TestContext } from 'node:test';
 import { Rga, encodeOp } from '@coedit/crdt';
 import { DocumentHub, type Member } from '../src/hub.ts';
-import { DocumentStore } from '../src/store.ts';
+import { DocumentStore, UnsyncedSnapshotError } from '../src/store.ts';
 
 function tempDir(t: TestContext): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'coedit-fsync-'));
@@ -61,6 +61,47 @@ describe('with fsync on', () => {
     store.append(2, [entry(2), entry(3)]);
     assert.deepEqual(events, [`sync ${SEGMENT_1}`, `sync ${SEGMENT_1}`]);
     store.close();
+  });
+
+  test('reopening a document syncs its directory before anything is appended (release review)', (t) => {
+    // A snapshot whose directory sync failed leaves its file (and a new segment) in place, maybe not durable; the
+    // hub then stops, and the next open must make them durable before appending after them.
+    const root = tempDir(t);
+    const first = DocumentStore.open(root, 'doc', { fsync: true }).store;
+    first.append(1, [entry(1)]);
+    first.close();
+    const events = record(t);
+    const { store } = DocumentStore.open(root, 'doc', { fsync: true });
+    assert.deepEqual(events, ['sync doc']);
+    store.append(2, [entry(2)]);
+    assert.deepEqual(events, ['sync doc', `sync ${SEGMENT_1}`]);
+    store.close();
+  });
+
+  test('a snapshot whose directory sync fails throws UnsyncedSnapshotError and deletes nothing older', (t) => {
+    const root = tempDir(t);
+    const { store } = DocumentStore.open(root, 'doc', { fsync: true });
+    store.append(1, [entry(1)]);
+    store.snapshot([entry(1)], 1);
+    store.append(2, [entry(2)]);
+    const openSync = fs.openSync;
+    t.mock.method(fs, 'openSync', (file: fs.PathLike, ...rest: unknown[]) => {
+      if (path.basename(String(file)) === 'doc') throw new Error('EIO: i/o error');
+      return (openSync as (...a: unknown[]) => number)(file, ...rest);
+    });
+    t.mock.method(console, 'error', () => {});
+    assert.throws(() => {
+      store.snapshot([entry(1), entry(2)], 2);
+    }, UnsyncedSnapshotError);
+    t.mock.restoreAll();
+    store.close();
+    assert.deepEqual(fs.readdirSync(path.join(root, 'doc')).sort(), [
+      SEGMENT_1, // entry 1, before keepFrom: a successful snapshot would have deleted it
+      'log-0000000000000002.jsonl',
+      'log-0000000000000003.jsonl', // the new segment, started before the directory sync
+      'snapshot-0000000000000001.jsonl', // and this
+      'snapshot-0000000000000002.jsonl',
+    ]);
   });
 
   test('a snapshot syncs its temporary file before the rename, and the directory after it', (t) => {

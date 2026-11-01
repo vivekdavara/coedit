@@ -63,6 +63,17 @@ export class StoreError extends Error {
   }
 }
 
+/**
+ * A snapshot renamed into place whose directory then couldn't be synced (DocumentStore.snapshot). The store is still
+ * usable, but whoever holds a copy of the document must stop using it and load the document again.
+ */
+export class UnsyncedSnapshotError extends Error {
+  constructor(dir: string, name: string, cause: unknown) {
+    super(`${dir}: ${name} is in place, but syncing the directory failed`, { cause });
+    this.name = 'UnsyncedSnapshotError';
+  }
+}
+
 const SEGMENT = /^log-(\d{16})\.jsonl$/;
 const SNAPSHOT = /^snapshot-(\d{16})\.jsonl$/;
 
@@ -176,8 +187,10 @@ export class DocumentStore {
     if (segments.length === 0) {
       fs.writeFileSync(path.join(dir, `log-${pad(first)}.jsonl`), '', { flag: 'wx' });
       segments.push({ first, last: first - 1 });
-      if (fsync) syncDirectory(dir);
     }
+    // Synced at every open, not only when a segment is made here: a snapshot or segment left in place by a snapshot
+    // whose directory sync failed (UnsyncedSnapshotError) is made durable before anything is appended after it.
+    if (fsync) syncDirectory(dir);
     const tail = segments.at(-1) as { first: number; last: number };
     const fd = fs.openSync(path.join(dir, `log-${pad(tail.first)}.jsonl`), 'a');
     const store = new DocumentStore(dir, fsync, fd, next - 1, segments);
@@ -208,9 +221,12 @@ export class DocumentStore {
 
   /**
    * Writes a snapshot after the last entry (`ops`: Rga.snapshot's operations as encodeOp writes them), starts a new
-   * segment, and deletes the older snapshots and every segment holding only entries before `keepFrom`. Throws only if
-   * the snapshot couldn't be written (its temporary file is removed); a new segment that can't be started or a
-   * deletion that fails is logged, and tried again at the next snapshot.
+   * segment, and deletes the older snapshots and every segment holding only entries before `keepFrom`. Throws if the
+   * snapshot couldn't be written (its temporary file is removed: the store is as it was), or, as an
+   * UnsyncedSnapshotError, if it was renamed into place but the directory couldn't be synced: then the snapshot (and
+   * a new segment) are in the directory but may not survive a power loss, so the caller's copy of the document can
+   * no longer be trusted to match what a reload finds (release review), and nothing older has been deleted. A new
+   * segment that can't be started or a deletion that fails is logged, and tried again at the next snapshot.
    */
   snapshot(ops: readonly string[], keepFrom: number, collected: readonly Span[] = []): void {
     this.#open();
@@ -264,7 +280,13 @@ export class DocumentStore {
         );
       }
     }
-    if (this.#fsync) syncDirectory(this.dir);
+    if (this.#fsync) {
+      try {
+        syncDirectory(this.dir);
+      } catch (error) {
+        throw new UnsyncedSnapshotError(this.dir, name, error);
+      }
+    }
     this.#prune(name, keepFrom);
   }
 
