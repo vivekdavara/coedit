@@ -20,6 +20,12 @@ elements); and tombstone collection by the leaf rule, with clients rebuilding fr
 review, the results at v1.0.0 and the final docs (day 5). Every day ended with a review by a separate agent that wrote
 each finding as a failing test before it was fixed.
 
+**Reading it**: start with [Results at v1.0.0](#results-at-v100), [Limitations](#limitations) and
+[Design decisions](#design-decisions); [the release review](#review-of-day-5-the-release-review) is what day 5 found
+and fixed. The sections by day ([results](#results-day-4), [reviews](#review-of-day-4)) are each day's record as
+measured then: how the numbers got where they are. WALKTHROUGH.md has the questions an interviewer is likely to ask,
+DESIGN.md the specification, CHANGELOG.md what the release holds.
+
 ## Architecture
 
 ```mermaid
