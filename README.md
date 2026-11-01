@@ -66,7 +66,7 @@ or a crash never leaves a client ahead of the server.
 | `packages/client/src/edit.ts`     | textarea before/after + caret to one edit, in code points                        |
 | `packages/client/src/textarea.ts` | remote changes applied to the textarea's text and selection                      |
 | `packages/client/src/App.tsx`     | the editor: textarea, remote cursors, status, offline switch                     |
-| `packages/client/scripts/`        | `sync-latency`: edit to acknowledgement and to other clients, loopback           |
+| `packages/client/scripts/`        | `sync-latency` (edit to ack and to others, loopback), `rebuild-cost`             |
 
 ## How to run
 

@@ -10,6 +10,7 @@
     "build": "vite build",
     "preview": "vite preview --port 5173 --strictPort",
     "sync-latency": "node --disable-warning=ExperimentalWarning scripts/sync_latency.ts",
+    "rebuild-cost": "node --disable-warning=ExperimentalWarning scripts/rebuild_cost.ts",
     "e2e": "playwright test"
   },
   "dependencies": {
