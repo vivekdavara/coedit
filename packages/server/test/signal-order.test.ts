@@ -47,8 +47,14 @@ test('the signal handlers are installed before the "listening" line is written',
   child.stderr.setEncoding('utf8').on('data', (chunk: string) => (err += chunk));
   const exit = once(child, 'exit');
   try {
+    // The probe writes its line to stderr before the "listening" line goes to stdout, but they are two pipes, and
+    // under load the parent can read stdout's first (day 5 saw err still empty here): so wait for both.
     const deadline = Date.now() + 10_000;
-    while (!out.includes('listening on') && Date.now() < deadline && child.exitCode === null) {
+    while (
+      !(out.includes('listening on') && /handlers: [^\n]*\n/.test(err)) &&
+      Date.now() < deadline &&
+      child.exitCode === null
+    ) {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     assert.match(out, /listening on/, err);
