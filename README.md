@@ -7,21 +7,18 @@ Several people edit one document at once, each in their own tab; edits merge wit
 every replica applies the same commuting operations. Built to be explained end to end: one ordering rule with a short
 proof, a strict wire format, and a test harness that is itself tested.
 
-**Status: day 4 of 5.** Done: the design for all five days (DESIGN.md), the workspaces and CI, the wire format with a
-strict decoder, the network simulator for convergence tests and its self-test, the client's mapping from textarea
-input to edits (day 1); the CRDT itself: RGA with Lamport ids, runs placed by the skip rule, tombstones, operations in
-any order, conflicts refused, positions as ids for presence, all property-tested for convergence (day 2); and sync:
-the WebSocket server with one hub per document (a numbered log, the echo as acknowledgement, refusing what it can't
-place or what would use up the clocks), the sync client (an outbox, catch-up then resend on reconnect, backoff), the
-React editor patching remote changes into the textarea with the caret kept in place, remote cursors, offline editing,
-and convergence tested end to end on the real server (day 3); persistence: an op log appended (and fsynced) before
-anything is relayed, snapshots that are lists of ordinary operations, recovery that drops a torn last line and refuses
-anything else it can't read back, snapshots sent to clients too far behind the log, idle documents unloaded;
-Playwright with two browsers editing at once and offline; measurements of the CRDT's speed, a document's growth, and
-what storage costs, and from them the element array replaced by counted blocks (about 175 times faster at 369,000
-elements); and tombstone collection by the leaf rule, with clients rebuilding from snapshots and a `resync` for one
-that names a collected element (day 4, the collection finished after the session on Vivek's go-ahead). Next: release
-(day 5).
+**Status: v1.0.0** (day 5 of 5; what's in it: CHANGELOG.md). Built a day at a time: the design, the wire format with a
+strict decoder, and a network simulator for convergence tests that is itself tested (day 1); the CRDT: RGA with
+Lamport ids, runs placed by the skip rule, tombstones, operations in any order, conflicts refused, positions as ids
+for presence, property-tested for convergence (day 2); sync: one hub per document on a WebSocket server (a numbered
+log, the echo as acknowledgement, refusing what it can't place), the sync client (an outbox, catch-up then resend,
+backoff), the React editor patching remote changes into the textarea with the caret kept in place, remote cursors and
+offline editing, convergence tested end to end on the real server (day 3); persistence: an op log fsynced before
+anything is relayed, snapshots that are ordinary operations, crash recovery; Playwright with two browsers; the
+measurements and, from them, counted blocks instead of one scanned array (about 175 times faster at 369,000
+elements); and tombstone collection by the leaf rule, with clients rebuilding from snapshots (day 4); the release
+review, the results at v1.0.0 and the final docs (day 5). Every day ended with a review by a separate agent that wrote
+each finding as a failing test before it was fixed.
 
 ## Architecture
 
@@ -116,6 +113,38 @@ npm run editing -w @coedit/crdt
 ```bash
 npm run storage -w @coedit/server
 ```
+
+## Results at v1.0.0
+
+Measured at `ec83d37` (the release code before day 5's review fixes) on the Apple M3 (macOS 26.6.2, Node 23.11.0),
+**on battery** (54%), 15:02 to 15:04 on day 5 with nothing else of mine running. The editing session is synthetic (a
+seeded random model of typing, the same 100,000 edits as on day 4); everything runs over loopback. Each line names
+the command that printed it; the day sections below have the before/after numbers and how they were reached.
+
+| What                                                       | Result                                                               | Command                                  |
+| ---------------------------------------------------------- | -------------------------------------------------------------------- | ---------------------------------------- |
+| Local typing, last tenth of the session (369,000 elements) | 262,273 edits/s (first tenth 235,845)                                | `npm run editing -w @coedit/crdt`        |
+| A second replica applying all 95,043 operations            | 356,873 ops/s; 195,649/s from JSON text through the strict decoder   | `npm run editing -w @coedit/crdt`        |
+| A 100,000-character paste into the middle                  | 14.4 ms local, 14.0 ms remote (10 operations)                        | `npm run editing -w @coedit/crdt`        |
+| Tombstones at the end of the session                       | 45.3% of 468,852 elements                                            | `npm run editing -w @coedit/crdt`        |
+| Tombstone collection (leaf rule, every delete old enough)  | 35,414 of 112,386 (31.5%) in 40 ms; snapshot 10,231,290 to 7,168,496 | `npm run editing -w @coedit/crdt`        |
+| Heap of a replica rebuilt from a snapshot                  | 229 bytes per element                                                | `npm run editing -w @coedit/crdt`        |
+| Durable appends (fsync every message)                      | 349 and 338 messages/s; submit p50 2.97 ms, p99 4.34 and 4.04 ms     | `npm run storage -w @coedit/server`      |
+| Appends without fsync                                      | 110,374 and 115,950 messages/s (in memory only: 77,210 and 83,367)   | `npm run storage -w @coedit/server`      |
+| Opening a 100,000-entry document from its log              | 484 and 473 ms                                                       | `npm run storage -w @coedit/server`      |
+| Writing its snapshot (with fsync)                          | 125 and 120 ms, 7,830,313 bytes                                      | `npm run storage -w @coedit/server`      |
+| Opening it from the snapshot                               | 291 and 288 ms                                                       | `npm run storage -w @coedit/server`      |
+| Edit to acknowledgement (1 writer, 3 readers, every 5 ms)  | p50 3.71 and 3.72 ms, p99 5.52 and 5.24 ms                           | `npm run sync-latency -w @coedit/client` |
+| Edit to each other client                                  | p50 3.87 and 3.82 ms, p99 6.00 and 5.79 ms                           | `npm run sync-latency -w @coedit/client` |
+| Tests                                                      | 503, all passing, 18 s                                               | `npm test`                               |
+
+Where two numbers are given the command was run twice. The storage script always runs the in-memory hub first, and
+both times it came out slower than the store without fsync; read the two as equal (the difference is under 0.01 ms a
+message) and both as far above the fsync row. Since day 4 (`077d156`) the latency script gives its server a data
+directory, so each edit waits for an fsync before it is relayed; it wasn't re-measured on day 4, and on day 3, with
+nothing on disk, the acknowledgement's p50 was 0.56 ms. The difference, about 3 ms, is the storage script's fsync p50:
+`F_FULLFSYNC` on this Mac (see "Durable acknowledgements" under Limitations). The storage script's snapshot is 18.5%
+smaller than day 4's 9,609,593 bytes because the server now collects what it can when it writes one.
 
 ## Results (day 4)
 
