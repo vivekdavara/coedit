@@ -285,7 +285,7 @@ synthetic.
 - **The worst delete** (`npm run worst-delete -w @coedit/crdt` at `617d125`): the wire format's largest, 10 million
   absent ids in a 48,936-byte message, is refused for the capacity in 69 ms, nothing changed. With `-- 800 twice`: 8
   million ids deleted ahead from a 39,136-byte message, 2.4 s and +651 MiB of heap, and a second such delete refused
-  in 1.1 s (the count of its ids); review 4's runs of the same gave 2.2 s and 1.0 s. See "Limitations (day 2)".
+  in 1.1 s (the count of its ids); review 4's runs of the same gave 2.2 s and 1.0 s. See "Limitations".
 
 ## Results (day 1)
 
@@ -531,7 +531,7 @@ member sent its own cursor (all three pinned, `578c354`, `5b9bdc5`), and `sent()
 equivalent: the connection is closing then). A randomized hub simulation it ran (150 seeds of 60 steps: joins,
 replacements, leaves, presence, multi-batch logs, synchronous and asynchronous writes) found no entry skipped,
 repeated or out of order. It also notes that the replica-id check can be got round by saying `hello` with a victim's
-id, which presence reveals: nothing is authenticated (see "Limitations (day 3)"). No third round: the session's power
+id, which presence reveals: nothing is authenticated (see "Limitations"). No third round: the session's power
 ran low (17% at 23:13).
 
 ## Review of day 2
@@ -657,7 +657,29 @@ delivery; a strict reader because `JSON.parse` lets two replicas read one messag
 the acknowledgement; Node's type stripping and test runner rather than a build step (and Vitest 5 and ESLint 10 don't
 support this machine's Node 23).
 
-## Limitations (day 4)
+## Limitations
+
+What v1.0.0 doesn't do, as of the release. Each day's own list (what it left for later) is in the git history; what
+the later days closed is gone from this one.
+
+**Storage**
+
+- **Durable acknowledgements cost an fsync a message.** Each message's entries are one write and one `fsyncSync`,
+  which on macOS is `F_FULLFSYNC` (about 3 ms here) and blocks the event loop while it runs: about 340 messages a
+  second for the whole server, every document included, and about 3 ms added to each edit's acknowledgement (see
+  "Results at v1.0.0"). There's no group commit (several messages' entries made durable by one fsync), which would
+  lift the throughput, not the latency of a lone typist.
+- **Loading a document blocks the server's event loop** (288 to 484 ms for 100,000 entries), and every client of
+  every document waits; so does writing a snapshot, which happens inside the message that reaches the interval (120
+  to 125 ms for that document with fsync).
+- **One server per data directory.** Nothing locks it: two servers on one directory would interleave appends.
+- **No checksums.** Each stored line is checked as the wire format checks a message, which catches a torn or garbled
+  line, not a character changed into another valid one.
+- **Deletes are logged every time they arrive**, so a client can grow a document's log by repeating deletes: each
+  repeat is an entry, kept until the next snapshot lets it go. Documents without a data directory (the tests') stay
+  in memory for the server's lifetime.
+
+**The CRDT**
 
 - **Tombstones are collected only by the leaf rule**: 31.5% of them in the synthetic 100,000-edit session. A stretch
   deleted from the middle of text typed one character at a time is never a leaf, so it stays; the stronger rule that
@@ -665,87 +687,39 @@ support this machine's Node 23).
   origins) is in DESIGN.md "Tombstones", not built. The bookkeeping costs about 17 bytes of heap an element, so the
   heap barely shrinks (the snapshot does, by 30%). Only the server collects; clients keep their tombstones until they
   rebuild from a snapshot.
-- **A client resynced or far behind rebuilds its whole replica** from a snapshot, and an unsent insert whose origin
-  was collected is re-anchored: its text survives, its place next to deleted text may move.
-- **Positions are found in blocks, not a tree**: about n / 512 + 512 steps an operation, flat at the sizes measured
-  (256,670 local edits a second at 369,000 elements), but still linear in the number of blocks. Loading a document
-  blocks the server's event loop (344 to 481 ms for 100,000 entries), and every client of every document waits.
-- **Durable acknowledgements cost an fsync a message**: about 340 messages a second per server on this Mac. Each
-  message's entries are one write and one fsync; there's no group commit.
-- **One server per data directory.** Nothing locks it: two servers on one directory would interleave appends.
-- **No checksums.** Each stored line is checked as the wire format checks a message, which catches a torn or garbled
-  line, not a character changed into another valid one.
-- **A snapshot is written inside the message that reaches the interval** (115 ms at 67,000 characters with fsync),
-  and a client too far behind gets the whole document as operations (fast to apply in id order, but all of it, about
-  40 bytes per visible character).
-- **Deletes are still logged every time they arrive**, so a client can grow a document's log by repeating deletes;
-  the log now lives on disk, and only the entries since the previous snapshot are kept, but each repeat is an entry.
-  Documents without a data directory (the tests') stay in memory for the server's lifetime.
-- Still true from day 3: nothing is authenticated; a refused operation stops that client; the outbox lives in memory;
-  the cursor mirror approximates the textarea's layout.
+- **A client resynced or far behind rebuilds its whole replica** from a snapshot (all of the document, about 40 bytes
+  a visible character), and an unsent insert whose origin was collected is re-anchored: its text survives, its place
+  next to deleted text may move.
+- **Positions are found in blocks, not a tree**: about n / 512 + 512 steps an operation, flat at the sizes measured,
+  but still linear in the number of blocks.
+- **A document holds at most 8,388,607 elements** (2^23 - 1), tombstones and waiting operations included, because a
+  V8 Map that has lost entries can refuse a `set` at about 2^23 live ones; an edit past it is refused.
+- **RGA's known interleaving**: text typed backwards at one spot interleaves with concurrent text typed the same way
+  (pinned by a test). Concurrent edits can split a grapheme cluster (never a code point).
+- **On its own, outside Coedit's server**, a replica trusts what it's given: one valid delete can name 10 million ids
+  (1,000 spans of 10,000), and a replica holding none of them records each as deleted ahead, up to its capacity (on
+  day 2, 800 spans took 2.4 s and 651 MiB of heap: `npm run worst-delete -w @coedit/crdt -- 800`). In Coedit clients
+  receive only what the server accepted, and the server refuses deletes naming ids it lacks; storing absent ids as
+  spans would fix it in the CRDT itself.
 
-## Limitations (day 3)
+**The server and the client**
 
-- **No persistence yet** (day 4): a server restart loses every document. A client that held one stops with
-  `ahead-of-server` and keeps its text on screen, but can't rejoin without a reload, which loses what it hadn't had
-  acknowledged.
 - **Nothing is authenticated.** The server binds 127.0.0.1, checks the page's origin, and trusts each client's
-  replica id. A client that reuses another's id (none would by accident: they're 16 random bytes) can have its edits
-  refused, and two connections with the same id replace each other. The server refuses inserts under another
-  connection's id, but a client can say `hello` with any id (presence reveals the others').
-- **A message's cost is bounded by the document's size, not by the message's**: a client may send deletes naming
-  the whole document in every message, each logged, and nothing limits how often.
-- **The server refuses rather than repairs**: an operation it refuses closes that client for good (the editor says so
-  and keeps the text). Only a buggy or tampered client sends one, but a client that hits the document's capacity is
-  stopped the same way.
-- **The outbox lives in memory**: closing a tab loses edits the server hasn't acknowledged.
-- **Every operation still scans one array**, O(n) in elements including tombstones, on the server too; nothing is
-  collected yet (day 4 measures and collects). The editor redraws the cursor mirror from the whole text on every
-  change.
-- **Deletes are logged every time they arrive**, so a client can grow a document's log (held in memory) without
-  bound by sending deletes of text already deleted, about 1 MiB a message; and every document name anyone says
-  `hello` to stays in memory for the server's lifetime. Both wait for day 4's persistence and a retention rule.
+  replica id: a client can say `hello` with any id (presence reveals the others'), and two connections with the same id
+  replace each other. It refuses inserts under another connection's id.
+- **Nothing limits how often a client sends.** A message's deletes are bounded, but not the rate of messages.
+- **The server refuses rather than repairs**: an operation it refuses stops that client (the editor says so and keeps
+  the text). Only a buggy or tampered client sends one, but a client that hits the document's capacity is stopped the
+  same way.
+- **The outbox lives in memory**: closing a tab loses edits the server hasn't acknowledged, and each tab is a new
+  replica.
 - **The cursor mirror only approximates the textarea's layout** (same font, padding, wrapping and scrollbar gutter);
   a browser that wraps a textarea differently from a div would draw a remote caret off by a line.
-- Day 2's limits that day 3 closes: clients now receive only what the server accepted, and the server refuses a
-  delete naming ids it lacks (checking spans run by run), so the 10-million-id delete never reaches a client; the
-  server keeps the first of two conflicting inserts and refuses the second; and it refuses counters more than its
-  capacity past its clock, so no client can use up the clocks.
 
-## Limitations (day 2)
+**The measurements**
 
-- Sync, presence over the network and persistence don't exist yet; the client edits locally (day 3 and 4).
-- Every operation scans one array: O(n) in the document's elements, tombstones included, and tombstones are never
-  collected yet. Day 4 measures it and collects what it can prove unneeded.
-- **One valid delete can name 10 million ids** (1,000 spans of 10,000), and a replica holding none of them records
-  each as deleted ahead, up to its capacity of 2^23 - 1 (8,388,607): the full 10 million are refused, 8 million (800
-  spans, a 39,136-byte message) take 2.4 s and +651 MiB of heap (0.16 s and +82 MiB for 100 spans, 4,836 bytes),
-  measured with `npm run worst-delete -w @coedit/crdt` (add `-- 800` or `-- 100` for 800 or 100 spans). Before the
-  capacity, the full delete took 3.6 s and +982 MiB. In
-  Coedit's topology clients only receive what the server accepted, and the server (day 3) must refuse operations whose
-  dependencies it lacks, checking spans against runs rather than id by id. Storing absent ids as spans would fix it in
-  the CRDT itself. The capacity is also what keeps V8's Maps from refusing a `set` halfway: a Map's table holds 2^24
-  entries, deleted ones included, so one that has lost entries can fail with about 2^23 live ones (reviews 2 and 3).
-  It also caps a document at 8,388,607 elements, tombstones and waiting ones included.
-- Which of two conflicting inserts a replica keeps depends on which arrived first; that the pair conflicts doesn't. The
-  server settles it by refusing the second (day 3).
-- A peer can exhaust a replica's clock with an insert at counter 2^53 - 1, or a delete naming this replica's own id
-  at 2^53 - 1 (a delete naming another replica's ids no longer moves the clock, since review 1); edits that need ids
-  are then refused. Only a buggy or tampered peer can, and the server will have to refuse such counters.
-- Text typed backwards at one spot interleaves with concurrent text typed the same way (RGA's known weakness, pinned
-  by a test); grapheme clusters can be split by concurrent edits (code points can't).
-
-## Limitations (day 1)
-
-- The CRDT, sync, presence and persistence don't exist yet; the client edits locally.
-- The server has no authentication: it binds 127.0.0.1 and will trust that clients are who they say.
-- CI hasn't run yet: the GitHub repository couldn't be created this session. The whole check passes in a clean clone
-  with `npm ci` on Node 23; Node 22 and 24, which CI uses, are not installed here.
-- The simulator's convergence check can't catch an id comparison that is wrong only across machines (such as
-  `localeCompare`): within one process a comparator used consistently converges. Day 2 tests the id order directly.
-- Its default transport (`structuredClone`) keeps Maps, BigInts and -0, which JSON on the wire wouldn't; day 2 should
-  pass the real codec as the transport.
-- Measurements are from one laptop; the decode numbers are single-threaded microbenchmarks on synthetic messages.
+- One laptop, on battery, over loopback; the editing session is a synthetic model of typing, not a recorded trace;
+  network latency would dominate any real deployment.
 
 ## License
 
