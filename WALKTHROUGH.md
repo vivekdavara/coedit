@@ -3,6 +3,31 @@
 Questions an interviewer is likely to ask about Coedit, with short answers grounded in the code. DESIGN.md has the
 full specification; this file is for explaining it out loud.
 
+## In two minutes (day 5)
+
+**Walk me through it.** Coedit is a plain-text editor several people edit at once. Each browser tab holds a replica of
+a sequence CRDT, RGA, written by hand in `packages/crdt/src/rga.ts`: every character gets an id `(counter, replica)`
+and names the character it was typed after, and one rule (start after that character, skip every larger id) puts
+concurrent inserts in the same place on every replica, whatever order they arrive in. A tab applies its own edits at
+once and sends them as operations over a WebSocket. The server (`packages/server/src/hub.ts`) applies each operation to
+its own replica first, so it can refuse anything that would split replicas apart, appends it to the document's log on
+disk with an fsync, and only then relays it to everyone, the sender included: the echo is the acknowledgement. A tab
+that reconnects catches up from the log; one too far behind gets a snapshot. On the release code the CRDT types at
+about 260,000 edits a second at 369,000 elements, and an edit reaches the other tabs in about 3.8 ms over loopback,
+3 ms of it the fsync.
+
+**What was hardest?** Three things. Proving and testing convergence: a network simulator that reorders, duplicates
+and drops messages, itself tested against deliberately broken CRDTs so a passing run means something. Keeping the
+client right across reconnects and snapshots: which unsent edits the server already has, and which must be sent
+again. And collecting tombstones safely: a deleted character can only go when no operation still to arrive could need
+it as a landmark.
+
+**How do you know it works?** About 500 tests, most of them properties over generated sessions: convergence through
+the simulator, the ordering against an independent implementation of the spec, clients on the real server under
+random disconnects (with and without collection), a SIGKILL while a client types, injected storage failures, and two
+real browsers editing at once. Every day ended with a review by a separate agent that wrote each defect it found as a
+failing test before I fixed it.
+
 ## The idea (day 1)
 
 **What is it, in one breath?** A plain-text editor several people can edit at once. Each browser tab holds a replica
@@ -465,8 +490,8 @@ never splits must give exactly the same operations, changes, positions, text and
 block code each fail it.
 
 **How big do documents get?** In that session 45% of the elements are tombstones at the end; each element is about
-186 bytes of heap; a snapshot is about 40 bytes per visible character and the log about 50 (JSON around a few
-characters per run).
+212 bytes of heap with blocks (229 at v1.0.0, with the collection's bookkeeping); a snapshot is about 40 bytes per
+visible character and the log about 50 (JSON around a few characters per run).
 
 ## Tombstones (day 4)
 
@@ -508,3 +533,61 @@ on the real dev server and sync server: typing seen both ways with the other's c
 (the result is one run then the other, as RGA promises), one offline while both edit and then back (both end with
 everything, nothing unacknowledged), and a document opened after everyone left. It uses the installed Chrome, so CI
 runs it too without downloading a browser.
+
+## The release (day 5)
+
+**What did you measure on the release code?** The README's "Results at v1.0.0", each line with its command: local
+typing at 262,273 edits a second in the last tenth of the 100,000-edit session, a second replica applying everything
+at 356,873 operations a second, 31.5% of tombstones collected in 40 ms, about 340 durable messages a second, a
+100,000-entry document opened in about 480 ms from its log and 290 ms from its snapshot, and an acknowledgement in 3.7
+ms at the median.
+
+**Why is an acknowledgement 3.7 ms now when day 3 measured 0.56?** Day 3's server kept nothing on disk. Since day 4 the
+latency script gives the server a data directory, and the server fsyncs each message before relaying it; on this Mac
+an fsync is `F_FULLFSYNC`, which waits for the drive, and the storage script measures it at 2.97 ms at the median. The
+round trip itself didn't change.
+
+**Your table shows the in-memory hub slower than the store without fsync. How?** It shouldn't be, and the honest
+answer is that the difference is noise from the script's order: the in-memory hub always runs first, both runs agreed,
+and the gap is under 0.01 ms a message (77,000 to 116,000 messages a second, against 340 with fsync). I report it as
+measured and say so, rather than drop the row or reorder until it looks right.
+
+**Why not group commit before releasing?** It would raise the throughput cap (one fsync for every message that arrived
+during the previous one), not the latency a single typist sees, and it changes the durability path, the part where a
+bug loses acknowledged edits. At about 340 messages a second, with people typing a few characters a second, it isn't
+what limits a real document today; it's the first item under "What would you do next?".
+
+## What went wrong
+
+**What went wrong, and what did you learn?** The ones worth telling:
+
+- **The first data structure didn't scale.** One array scanned from the start made every operation O(n): fine for
+  typing, but 129.7 s for the 100,000-edit session and 6 to 7 s to load a document, with the server blocked. I only saw
+  it because day 4 measured a long session; blocks with visible counts made it flat (2.7 s).
+- **Order matters even when the result doesn't.** The first snapshot format loaded five times slower than the log,
+  because a tombstone typed early sits after everything typed later at its spot and placing it scanned past all of
+  that. Writing runs in id order fixed it (2,350 ms to 344 ms).
+- **Failure paths are where the bugs were.** Most review findings were not in the happy path: a refused handshake
+  reset at once crashed the server (day 3); a failed prune made a document unopenable later (day 4); a snapshot write
+  that failed after collecting left memory and disk as two different documents (the collection review). The fix each
+  time was to change memory only after the step that can fail has succeeded.
+- **Fixes need their own review.** Second rounds kept finding bugs in the first round's fixes, for example an edit just
+  before a long deleted stretch walking every tombstone (1,864 ms against 12 ms) after the blocks went in.
+- **Unwatched CI and flaky tests.** On day 4 I reported CI green on every push when one push hadn't been watched, and
+  its Node 24 job had failed on a flaky smoke test; on day 5 a test that read two pipes in an assumed order failed
+  under load. Both are fixed; the lesson is to watch every run I report and to never assume an order between streams.
+
+## What would you do next?
+
+**If you had another week?** In order:
+
+1. **Group commit**: append without blocking (an async fsync), and make every message that arrived during one fsync
+   durable with the next, relaying them together. Measure messages a second against the 340 now.
+2. **Load and snapshot off the event loop**: build the replica from disk in a worker thread or in slices, so opening a
+   large document doesn't stall every other document (288 to 484 ms today for 100,000 entries).
+3. **A persistent outbox** in IndexedDB with a stable replica id per document, so closing a tab loses nothing.
+4. **Authentication**: a token tied to the replica id, so a client can't say `hello` as someone else.
+5. **The stronger tombstone rule** (DESIGN.md "Tombstones"): refuse old inserts with `resync` and re-issue a returning
+   client's edits under new ids, so a deleted middle stretch can go too.
+6. **A tree instead of blocks** (an order-statistics B-tree or rope) if documents grow past a few million elements, a
+   checksum per stored line, and a lock file on the data directory.
