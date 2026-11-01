@@ -83,7 +83,7 @@ test('worst-delete reports a first delete refused for the capacity', async () =>
   const stdout = await run('../scripts/worst_delete.ts', ['3', 'once', '20000'], ['--expose-gc']);
   assert.match(
     stdout,
-    /^refused \(RangeError\): 0 ids deleted ahead from a \d+-byte message: \d+\.\d ms, heap \+\d+ MiB, pending 0$/m,
+    /^refused \(RangeError\): 0 ids deleted ahead from a \d+-byte message: \d+\.\d ms, heap [+-]\d+ MiB, pending 0$/m,
   );
 });
 

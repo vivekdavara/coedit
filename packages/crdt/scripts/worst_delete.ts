@@ -35,12 +35,14 @@ try {
 }
 const ms = performance.now() - start;
 gc();
-const mib = (process.memoryUsage().heapUsed - heap) / 2 ** 20;
+const mib = Math.round((process.memoryUsage().heapUsed - heap) / 2 ** 20);
+// Signed: a refused delete can leave the heap a little smaller than before, and "+-0" broke a CI run's smoke test.
+const signed = `${mib >= 0 ? '+' : '-'}${Math.abs(mib)}`;
 // Measured, not computed from the arguments: what the replica says it recorded.
 const { deletedAhead } = rga.sizes();
 console.log(`capacity ${capacity ?? MAX_CAPACITY}`);
 console.log(
-  `${first}: ${deletedAhead} ids deleted ahead from a ${bytes}-byte message: ${ms.toFixed(1)} ms, heap +${mib.toFixed(0)} MiB, pending ${rga.pending}`,
+  `${first}: ${deletedAhead} ids deleted ahead from a ${bytes}-byte message: ${ms.toFixed(1)} ms, heap ${signed} MiB, pending ${rga.pending}`,
 );
 if (twice) {
   const second = performance.now();
