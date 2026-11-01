@@ -6,6 +6,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
+  MAX_INSERT_LENGTH,
   Rga,
   decodeClientMessage,
   encodeServerMessage,
@@ -360,5 +361,74 @@ describe('re-issuing unsent inserts after a collecting snapshot', () => {
     latest().receive({ type: 'snapshot', seq: 4, ops: withoutD, last: true });
     assert.equal(sync.status, 'failed');
     assert.match(sync.detail, /neither the snapshot nor the outbox/);
+  });
+  test('a paste split into several inserts is re-issued as consecutive ids, and a delete inside it renamed', () => {
+    const { sync, server, rejoin } = afterCollectedT();
+    const length = MAX_INSERT_LENGTH + 5; // two inserts, the second after the first's last character
+    const paste = Array.from({ length }, (_, i) => String.fromCharCode(97 + (i % 26))).join('');
+    sync.edit(2, 0, paste); // 3@me.. after t
+    sync.edit(2 + MAX_INSERT_LENGTH, 1, ''); // deletes the second insert's first character
+    const sent = opsOf(rejoin());
+    const inserts = sent.filter((op) => op.type === 'insert');
+    assert.equal(inserts.length, 2);
+    // Re-issued from 2@me (the snapshot's highest is 1@x), the second after the first's last.
+    assert.deepEqual(
+      inserts.map((op) => [op.id.counter, op.origin?.counter, op.origin?.replica]),
+      [
+        [2, 1, 'x'],
+        [2 + MAX_INSERT_LENGTH, 1 + MAX_INSERT_LENGTH, 'me'],
+      ],
+    );
+    assert.deepEqual(sent.at(-1), {
+      type: 'delete',
+      spans: [{ replica: 'me', counter: 2 + MAX_INSERT_LENGTH, length: 1 }],
+    });
+    for (const op of sent) server.apply(op, 4);
+    const expected = paste.slice(0, MAX_INSERT_LENGTH) + paste.slice(MAX_INSERT_LENGTH + 1);
+    assert.equal(server.text(), `p${expected}`);
+    assert.equal(sync.rga.text(), server.text());
+  });
+
+  test('a second rebuild with re-issued inserts still unsent keeps them, or re-issues them again', () => {
+    // x typed "pqt"; me, offline, typed X after t. x deletes t: collected, and me rebuilds and re-issues X after q,
+    // but drops before sending. x then deletes q too: collected at the next snapshot, and me rebuilds again.
+    const log: Op[] = [
+      insert(1, 'x', null, 'p'),
+      insert(2, 'x', [1, 'x'], 'q'),
+      insert(3, 'x', [2, 'x'], 't'),
+      { type: 'delete', spans: [{ replica: 'x', counter: 3, length: 1 }] },
+    ];
+    const server = new Rga('server');
+    log.forEach((op, i) => server.apply(op, i + 1));
+    assert.equal(server.collect(4), 1);
+    const { sync, latest } = client();
+    sync.start();
+    latest().open();
+    latest().take();
+    latest().receive({ type: 'welcome', protocol: 1, doc: 'd', seq: 3 });
+    latest().receive({ type: 'ops', from: 1, ops: log.slice(0, 3) });
+    sync.stop();
+    sync.edit(3, 0, 'X'); // 4@me after t: "pqtX"
+    const join = (seq: number) => {
+      sync.start();
+      latest().open();
+      latest().take();
+      latest().receive({ type: 'welcome', protocol: 1, doc: 'd', seq });
+      latest().receive({ type: 'collected', spans: server.collectedSpans() });
+      latest().receive({ type: 'snapshot', seq, ops: server.snapshot(), last: true });
+      assert.equal(sync.status, 'online', sync.detail);
+      return opsOf(latest().take());
+    };
+    assert.deepEqual(join(4), [insert(3, 'me', [2, 'x'], 'X')], 'after q, under 3@me');
+    sync.stop(); // dropped before the server got it
+    const more: Op = { type: 'delete', spans: [{ replica: 'x', counter: 2, length: 1 }] };
+    log.push(more);
+    server.apply(more, 5);
+    assert.equal(server.collect(5), 1, 'q, now a leaf');
+    const sent = join(5);
+    assert.deepEqual(sent, [insert(2, 'me', [1, 'x'], 'X')], 're-issued again, after p');
+    for (const op of sent) server.apply(op, 6);
+    assert.equal(server.text(), 'pX');
+    assert.equal(sync.rga.text(), 'pX');
   });
 });
